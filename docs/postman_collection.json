@@ -1,0 +1,661 @@
+{
+  "info": {
+    "_postman_id": "8f2c1a10-4b3e-4a2a-9c1e-music-discovery-api",
+    "name": "Music Discovery Platform API",
+    "description": "Local backend at http://localhost:8000. Start MySQL + `php artisan serve` first (see backend/README.md). Auth requests auto-save {{token}}; list requests auto-save {{song_id}}/{{artist_id}}/{{album_id}}; Create Playlist auto-saves {{playlist_id}}.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000", "type": "string" },
+    { "key": "api_url", "value": "{{base_url}}/api/v1", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "song_id", "value": "", "type": "string" },
+    { "key": "artist_id", "value": "", "type": "string" },
+    { "key": "album_id", "value": "", "type": "string" },
+    { "key": "playlist_id", "value": "", "type": "string" },
+    { "key": "email", "value": "demo@musicdiscovery.test", "type": "string" },
+    { "key": "password", "value": "password", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/up", "host": ["{{base_url}}"], "path": ["up"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.success && json.data && json.data.token) {",
+                  "    pm.collectionVariables.set('token', json.data.token);",
+                  "    console.log('Saved token from register');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test User\",\n  \"email\": \"newuser@musicdiscovery.test\",\n  \"password\": \"password123\",\n  \"password_confirmation\": \"password123\",\n  \"country\": \"US\",\n  \"language\": \"en\"\n}"
+            },
+            "url": { "raw": "{{api_url}}/auth/register", "host": ["{{api_url}}"], "path": ["auth", "register"] }
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.success && json.data && json.data.token) {",
+                  "    pm.collectionVariables.set('token', json.data.token);",
+                  "    console.log('Saved token from login');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": { "raw": "{{api_url}}/auth/login", "host": ["{{api_url}}"], "path": ["auth", "login"] }
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/auth/me", "host": ["{{api_url}}"], "path": ["auth", "me"] }
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{api_url}}/auth/logout", "host": ["{{api_url}}"], "path": ["auth", "logout"] }
+          }
+        },
+        {
+          "name": "Forgot Password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{email}}\"\n}" },
+            "url": { "raw": "{{api_url}}/auth/forgot-password", "host": ["{{api_url}}"], "path": ["auth", "forgot-password"] }
+          }
+        },
+        {
+          "name": "Reset Password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"paste-token-from-log-or-email\",\n  \"email\": \"{{email}}\",\n  \"password\": \"newpassword123\",\n  \"password_confirmation\": \"newpassword123\"\n}"
+            },
+            "url": { "raw": "{{api_url}}/auth/reset-password", "host": ["{{api_url}}"], "path": ["auth", "reset-password"] }
+          }
+        },
+        {
+          "name": "Google Redirect",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/auth/google", "host": ["{{api_url}}"], "path": ["auth", "google"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Search",
+      "item": [
+        {
+          "name": "Global Search",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/search?q=believer",
+              "host": ["{{api_url}}"],
+              "path": ["search"],
+              "query": [{ "key": "q", "value": "believer" }]
+            }
+          }
+        },
+        {
+          "name": "Typed Search (songs)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/search?q=a&type=song&page=1&limit=20&sort=popularity",
+              "host": ["{{api_url}}"],
+              "path": ["search"],
+              "query": [
+                { "key": "q", "value": "a" },
+                { "key": "type", "value": "song" },
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "sort", "value": "popularity" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Autocomplete Suggest",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/search/suggest?q=so&limit=10",
+              "host": ["{{api_url}}"],
+              "path": ["search", "suggest"],
+              "query": [
+                { "key": "q", "value": "so" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Songs",
+      "item": [
+        {
+          "name": "List Songs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.success && Array.isArray(json.data) && json.data.length) {",
+                  "    pm.collectionVariables.set('song_id', json.data[0].id);",
+                  "    console.log('Saved song_id: ' + json.data[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/songs?page=1&limit=20",
+              "host": ["{{api_url}}"],
+              "path": ["songs"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "genre", "value": "", "disabled": true },
+                { "key": "language", "value": "", "disabled": true },
+                { "key": "release_year", "value": "", "disabled": true },
+                { "key": "sort", "value": "popularity", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Trending Songs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/songs/trending?limit=10",
+              "host": ["{{api_url}}"],
+              "path": ["songs", "trending"],
+              "query": [{ "key": "limit", "value": "10" }]
+            }
+          }
+        },
+        {
+          "name": "Get Song",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/songs/{{song_id}}", "host": ["{{api_url}}"], "path": ["songs", "{{song_id}}"] }
+          }
+        },
+        {
+          "name": "Related Songs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/songs/{{song_id}}/related", "host": ["{{api_url}}"], "path": ["songs", "{{song_id}}", "related"] }
+          }
+        },
+        {
+          "name": "Song Preview",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/songs/{{song_id}}/preview", "host": ["{{api_url}}"], "path": ["songs", "{{song_id}}", "preview"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Artists",
+      "item": [
+        {
+          "name": "List Artists",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.success && Array.isArray(json.data) && json.data.length) {",
+                  "    pm.collectionVariables.set('artist_id', json.data[0].id);",
+                  "    console.log('Saved artist_id: ' + json.data[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/artists?page=1&limit=20",
+              "host": ["{{api_url}}"],
+              "path": ["artists"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Artist",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/artists/{{artist_id}}", "host": ["{{api_url}}"], "path": ["artists", "{{artist_id}}"] }
+          }
+        },
+        {
+          "name": "Artist Albums",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/artists/{{artist_id}}/albums", "host": ["{{api_url}}"], "path": ["artists", "{{artist_id}}", "albums"] }
+          }
+        },
+        {
+          "name": "Artist Songs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/artists/{{artist_id}}/songs", "host": ["{{api_url}}"], "path": ["artists", "{{artist_id}}", "songs"] }
+          }
+        },
+        {
+          "name": "Related Artists",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/artists/{{artist_id}}/related", "host": ["{{api_url}}"], "path": ["artists", "{{artist_id}}", "related"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Albums",
+      "item": [
+        {
+          "name": "List Albums",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.success && Array.isArray(json.data) && json.data.length) {",
+                  "    pm.collectionVariables.set('album_id', json.data[0].id);",
+                  "    console.log('Saved album_id: ' + json.data[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/albums?page=1&limit=20",
+              "host": ["{{api_url}}"],
+              "path": ["albums"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Album",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/albums/{{album_id}}", "host": ["{{api_url}}"], "path": ["albums", "{{album_id}}"] }
+          }
+        },
+        {
+          "name": "Album Tracks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/albums/{{album_id}}/tracks", "host": ["{{api_url}}"], "path": ["albums", "{{album_id}}", "tracks"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Trending",
+      "item": [
+        {
+          "name": "Trending Songs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/trending/songs?limit=10", "host": ["{{api_url}}"], "path": ["trending", "songs"], "query": [{ "key": "limit", "value": "10" }] }
+          }
+        },
+        {
+          "name": "Trending Artists",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/trending/artists?limit=10", "host": ["{{api_url}}"], "path": ["trending", "artists"], "query": [{ "key": "limit", "value": "10" }] }
+          }
+        },
+        {
+          "name": "Trending Albums",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/trending/albums?limit=10", "host": ["{{api_url}}"], "path": ["trending", "albums"], "query": [{ "key": "limit", "value": "10" }] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reference Data",
+      "item": [
+        {
+          "name": "List Genres",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/genres", "host": ["{{api_url}}"], "path": ["genres"] }
+          }
+        },
+        {
+          "name": "List Languages",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/languages", "host": ["{{api_url}}"], "path": ["languages"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Playlists",
+      "item": [
+        {
+          "name": "List Playlists",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/playlists?page=1&limit=20",
+              "host": ["{{api_url}}"],
+              "path": ["playlists"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create Playlist",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.success && json.data && json.data.id) {",
+                  "    pm.collectionVariables.set('playlist_id', json.data.id);",
+                  "    console.log('Saved playlist_id: ' + json.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"My Postman Playlist\",\n  \"description\": \"Created from Postman\",\n  \"visibility\": \"private\"\n}"
+            },
+            "url": { "raw": "{{api_url}}/playlists", "host": ["{{api_url}}"], "path": ["playlists"] }
+          }
+        },
+        {
+          "name": "Get Playlist",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/playlists/{{playlist_id}}", "host": ["{{api_url}}"], "path": ["playlists", "{{playlist_id}}"] }
+          }
+        },
+        {
+          "name": "Update Playlist",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"My Updated Playlist\",\n  \"visibility\": \"public\"\n}"
+            },
+            "url": { "raw": "{{api_url}}/playlists/{{playlist_id}}", "host": ["{{api_url}}"], "path": ["playlists", "{{playlist_id}}"] }
+          }
+        },
+        {
+          "name": "Add Song to Playlist",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"song_id\": \"{{song_id}}\"\n}"
+            },
+            "url": { "raw": "{{api_url}}/playlists/{{playlist_id}}/songs", "host": ["{{api_url}}"], "path": ["playlists", "{{playlist_id}}", "songs"] }
+          }
+        },
+        {
+          "name": "Remove Song from Playlist",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/playlists/{{playlist_id}}/songs/{{song_id}}",
+              "host": ["{{api_url}}"],
+              "path": ["playlists", "{{playlist_id}}", "songs", "{{song_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Delete Playlist",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{api_url}}/playlists/{{playlist_id}}", "host": ["{{api_url}}"], "path": ["playlists", "{{playlist_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Favorites",
+      "item": [
+        {
+          "name": "List Favorites",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/favorites?page=1&limit=20",
+              "host": ["{{api_url}}"],
+              "path": ["favorites"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Add Favorite",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{api_url}}/favorites/{{song_id}}", "host": ["{{api_url}}"], "path": ["favorites", "{{song_id}}"] }
+          }
+        },
+        {
+          "name": "Remove Favorite",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{api_url}}/favorites/{{song_id}}", "host": ["{{api_url}}"], "path": ["favorites", "{{song_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "History",
+      "item": [
+        {
+          "name": "List History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{api_url}}/history?page=1&limit=20",
+              "host": ["{{api_url}}"],
+              "path": ["history"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Record Play",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"song_id\": \"{{song_id}}\",\n  \"ms_played\": 120000\n}"
+            },
+            "url": { "raw": "{{api_url}}/history", "host": ["{{api_url}}"], "path": ["history"] }
+          }
+        },
+        {
+          "name": "Clear History",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{api_url}}/history", "host": ["{{api_url}}"], "path": ["history"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Profile",
+      "item": [
+        {
+          "name": "Get Profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{api_url}}/profile", "host": ["{{api_url}}"], "path": ["profile"] }
+          }
+        },
+        {
+          "name": "Update Profile",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated Name\",\n  \"country\": \"IN\",\n  \"language\": \"en\"\n}"
+            },
+            "url": { "raw": "{{api_url}}/profile", "host": ["{{api_url}}"], "path": ["profile"] }
+          }
+        },
+        {
+          "name": "Update Avatar",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "avatar", "type": "file", "src": "" }
+              ]
+            },
+            "url": { "raw": "{{api_url}}/profile/avatar", "host": ["{{api_url}}"], "path": ["profile", "avatar"] }
+          }
+        },
+        {
+          "name": "Delete Profile",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{api_url}}/profile", "host": ["{{api_url}}"], "path": ["profile"] }
+          }
+        }
+      ]
+    }
+  ]
+}

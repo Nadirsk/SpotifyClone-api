@@ -1,0 +1,1300 @@
+openapi: 3.1.0
+
+info:
+  title: Music Discovery Platform API
+  version: "1.0"
+  description: |
+    Metadata-first music discovery API. The platform never hosts or streams
+    copyrighted audio — `preview_url` / `external_url` point at the owning
+    provider. See `../01_PRODUCT_REQUIREMENTS.md` and the other numbered
+    architecture documents for the full product/architecture spec this API
+    implements, and `DEFERRED.md` for what is intentionally not wired up yet
+    (Redis, Elasticsearch, live provider credentials).
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Search
+  - name: Songs
+  - name: Artists
+  - name: Albums
+  - name: Trending
+  - name: Genres
+  - name: Languages
+  - name: Playlists
+  - name: Favorites
+  - name: History
+  - name: Profile
+
+paths:
+  # ---------------------------------------------------------------------
+  # Auth
+  # ---------------------------------------------------------------------
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, password_confirmation]
+              properties:
+                name: { type: string, maxLength: 255 }
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8 }
+                password_confirmation: { type: string, format: password }
+                country: { type: string, minLength: 2, maxLength: 2, nullable: true }
+                language: { type: string, maxLength: 10, nullable: true }
+      responses:
+        "201":
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthenticatedEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and receive a bearer token
+      description: >
+        On failure, an unknown email and a wrong password return the
+        byte-identical error, deliberately, to resist account enumeration.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthenticatedEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current access token
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get the authenticated user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password reset email
+      description: >
+        Always returns the same success response, whether or not the email
+        exists, to resist account enumeration.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Reset a password using the emailed token
+      description: Revokes every existing access token for the account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, email, password, password_confirmation]
+              properties:
+                token: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8 }
+                password_confirmation: { type: string, format: password }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/google:
+    get:
+      tags: [Auth]
+      summary: Start the Google OAuth flow
+      security: []
+      responses:
+        "200":
+          description: Consent URL to redirect the client to
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          redirect_url: { type: string, format: uri }
+
+  /auth/google/callback:
+    get:
+      tags: [Auth]
+      summary: Google OAuth callback
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Logged in via Google
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthenticatedEnvelope" }
+        "401": { description: Invalid or expired OAuth code }
+
+  # ---------------------------------------------------------------------
+  # Search
+  # ---------------------------------------------------------------------
+  /search:
+    get:
+      tags: [Search]
+      summary: Global or typed search
+      description: >
+        Without `type`, returns up to `config('search.limits.per_type')`
+        results per type. With `type`, returns one paginated list. Backed by
+        MySQL FULLTEXT today; see DEFERRED.md for the Elasticsearch upgrade
+        path — the response shape does not change either way.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Query"
+        - name: type
+          in: query
+          schema: { type: string, enum: [song, artist, album, playlist] }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+        - name: genre
+          in: query
+          schema: { type: string }
+        - name: language
+          in: query
+          schema: { type: string }
+        - name: country
+          in: query
+          schema: { type: string }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [relevance, newest, oldest, popularity, alphabetical]
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/GlobalSearchResponse"
+                  - $ref: "#/components/schemas/PaginatedSongResponse"
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /search/suggest:
+    get:
+      tags: [Search]
+      summary: Autocomplete suggestions
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Query"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Suggested completions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          suggestions:
+                            type: array
+                            items: { type: string }
+
+  # ---------------------------------------------------------------------
+  # Songs
+  # ---------------------------------------------------------------------
+  /songs:
+    get:
+      tags: [Songs]
+      summary: List songs
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Genre"
+        - $ref: "#/components/parameters/Language"
+        - $ref: "#/components/parameters/Country"
+        - $ref: "#/components/parameters/ReleaseYear"
+        - $ref: "#/components/parameters/Sort"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedSongs" }
+
+  /songs/trending:
+    get:
+      tags: [Songs]
+      summary: Trending songs
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200": { $ref: "#/components/responses/SongList" }
+
+  /songs/{id}:
+    get:
+      tags: [Songs]
+      summary: Get a song
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Song
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Song" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /songs/{id}/related:
+    get:
+      tags: [Songs]
+      summary: Songs related to this one
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200": { $ref: "#/components/responses/SongList" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /songs/{id}/preview:
+    get:
+      tags: [Songs]
+      summary: Get a song's preview/external playback URL
+      description: >
+        Returns the URL only — the platform never proxies or hosts audio
+        (01_PRODUCT_REQUIREMENTS §1). Playback happens through the owning
+        provider's own SDK/embed on the client.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Preview metadata
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id: { type: string, format: uuid }
+                          title: { type: string }
+                          duration: { type: integer }
+                          preview_url: { type: string, format: uri, nullable: true }
+                          external_url: { type: string, format: uri, nullable: true }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------------
+  # Artists
+  # ---------------------------------------------------------------------
+  /artists:
+    get:
+      tags: [Artists]
+      summary: List artists
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Country"
+        - $ref: "#/components/parameters/Sort"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedArtists" }
+
+  /artists/{id}:
+    get:
+      tags: [Artists]
+      summary: Get an artist
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Artist
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Artist" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /artists/{id}/albums:
+    get:
+      tags: [Artists]
+      summary: An artist's albums
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedAlbums" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /artists/{id}/songs:
+    get:
+      tags: [Artists]
+      summary: An artist's songs
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedSongs" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /artists/{id}/related:
+    get:
+      tags: [Artists]
+      summary: Artists related to this one
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Related artists
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Artist" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------------
+  # Albums
+  # ---------------------------------------------------------------------
+  /albums:
+    get:
+      tags: [Albums]
+      summary: List albums
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Genre"
+        - $ref: "#/components/parameters/Language"
+        - $ref: "#/components/parameters/ReleaseYear"
+        - $ref: "#/components/parameters/Sort"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedAlbums" }
+
+  /albums/{id}:
+    get:
+      tags: [Albums]
+      summary: Get an album, including its tracks
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Album
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Album" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /albums/{id}/tracks:
+    get:
+      tags: [Albums]
+      summary: An album's track list, in running order
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200": { $ref: "#/components/responses/SongList" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------------
+  # Trending
+  # ---------------------------------------------------------------------
+  /trending/songs:
+    get:
+      tags: [Trending]
+      summary: Trending songs (same as /songs/trending)
+      security: []
+      parameters: [ $ref: "#/components/parameters/Limit" ]
+      responses:
+        "200": { $ref: "#/components/responses/SongList" }
+
+  /trending/artists:
+    get:
+      tags: [Trending]
+      summary: Trending artists
+      security: []
+      parameters: [ $ref: "#/components/parameters/Limit" ]
+      responses:
+        "200":
+          description: Trending artists
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Artist" }
+
+  /trending/albums:
+    get:
+      tags: [Trending]
+      summary: Trending albums
+      security: []
+      parameters: [ $ref: "#/components/parameters/Limit" ]
+      responses:
+        "200":
+          description: Trending albums
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Album" }
+
+  # ---------------------------------------------------------------------
+  # Reference data
+  # ---------------------------------------------------------------------
+  /genres:
+    get:
+      tags: [Genres]
+      summary: List all genres
+      security: []
+      responses:
+        "200":
+          description: Genres
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Genre" }
+
+  /languages:
+    get:
+      tags: [Languages]
+      summary: List all languages
+      security: []
+      responses:
+        "200":
+          description: Languages
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Language" }
+
+  # ---------------------------------------------------------------------
+  # Playlists
+  # ---------------------------------------------------------------------
+  /playlists:
+    get:
+      tags: [Playlists]
+      summary: List playlists visible to the caller
+      description: >
+        A signed-in caller sees their own playlists (any visibility) plus
+        everyone's public ones. A guest sees only public ones. Unlisted
+        playlists never appear in this listing regardless of caller — they
+        are reachable only by direct link (GET /playlists/{id}).
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Playlists
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - $ref: "#/components/schemas/PaginationMeta"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Playlist" }
+    post:
+      tags: [Playlists]
+      summary: Create a playlist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, visibility]
+              properties:
+                title: { type: string, maxLength: 255 }
+                description: { type: string, maxLength: 1000, nullable: true }
+                visibility: { $ref: "#/components/schemas/PlaylistVisibility" }
+                cover_image: { type: string, format: uri, nullable: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /playlists/{playlist}:
+    get:
+      tags: [Playlists]
+      summary: Get a playlist
+      description: >
+        Public and unlisted playlists are readable by anyone with the id.
+        Private playlists are readable only by their owner.
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      responses:
+        "200":
+          description: Playlist
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Playlist" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Playlists]
+      summary: Update a playlist (owner only)
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 255 }
+                description: { type: string, maxLength: 1000, nullable: true }
+                visibility: { $ref: "#/components/schemas/PlaylistVisibility" }
+                cover_image: { type: string, format: uri, nullable: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Playlists]
+      summary: Delete a playlist (owner only)
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /playlists/{playlist}/songs:
+    post:
+      tags: [Playlists]
+      summary: Add a song to a playlist (owner only)
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [song_id]
+              properties:
+                song_id: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Added
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Song is already in the playlist, or the playlist is at its track cap
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /playlists/{playlist}/songs/{song}:
+    delete:
+      tags: [Playlists]
+      summary: Remove a song from a playlist (owner only)
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+        - name: song
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Playlist not found, or the song is not in it
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  # ---------------------------------------------------------------------
+  # Favorites
+  # ---------------------------------------------------------------------
+  /favorites:
+    get:
+      tags: [Favorites]
+      summary: List the authenticated user's favorite songs
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200": { $ref: "#/components/responses/PaginatedSongs" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /favorites/{song}:
+    post:
+      tags: [Favorites]
+      summary: Favorite a song
+      description: Idempotent — favoriting an already-favorited song still returns 201.
+      parameters:
+        - name: song
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "201": { $ref: "#/components/responses/Success" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Favorites]
+      summary: Unfavorite a song
+      description: Idempotent — succeeds even if the song was not favorited.
+      parameters:
+        - name: song
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  # ---------------------------------------------------------------------
+  # History
+  # ---------------------------------------------------------------------
+  /history:
+    get:
+      tags: [History]
+      summary: List the authenticated user's listening history
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: History
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - $ref: "#/components/schemas/PaginationMeta"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/HistoryEntry" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [History]
+      summary: Record a play
+      description: >
+        A repeat play of the same song inside
+        `config('music.history.dedupe_window_minutes')` is deduplicated:
+        the endpoint returns 200 with no new row, instead of 201.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [song_id]
+              properties:
+                song_id: { type: string, format: uuid }
+                ms_played: { type: integer, minimum: 0, nullable: true }
+      responses:
+        "201":
+          description: Play recorded
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/HistoryEntry" }
+        "200":
+          description: Deduplicated — no new row was written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [History]
+      summary: Clear the authenticated user's listening history
+      responses:
+        "204": { description: Cleared }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  # ---------------------------------------------------------------------
+  # Profile
+  # ---------------------------------------------------------------------
+  /profile:
+    get:
+      tags: [Profile]
+      summary: Get the authenticated user's profile
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    put:
+      tags: [Profile]
+      summary: Update the authenticated user's profile
+      description: >
+        Changing `password` requires `current_password` for accounts that
+        have one. OAuth-only accounts (null password) may set one without it.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 255 }
+                email: { type: string, format: email }
+                country: { type: string, minLength: 2, maxLength: 2, nullable: true }
+                language: { type: string, maxLength: 10, nullable: true }
+                password: { type: string, format: password }
+                password_confirmation: { type: string, format: password }
+                current_password: { type: string, format: password }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Profile]
+      summary: Delete (soft-delete) the authenticated user's account
+      description: Revokes every access token the account holds.
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /profile/avatar:
+    put:
+      tags: [Profile]
+      summary: Update the authenticated user's avatar
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [avatar]
+              properties:
+                avatar:
+                  type: string
+                  format: binary
+                  description: JPG, JPEG, PNG or WEBP, max 2MB.
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Sanctum personal access token
+
+  parameters:
+    Query:
+      name: q
+      in: query
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 100 }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, default: 20 }
+    Genre:
+      name: genre
+      in: query
+      description: Genre slug or name.
+      schema: { type: string }
+    Language:
+      name: language
+      in: query
+      description: Language code or name.
+      schema: { type: string }
+    Country:
+      name: country
+      in: query
+      description: ISO 3166-1 alpha-2.
+      schema: { type: string, minLength: 2, maxLength: 2 }
+    ReleaseYear:
+      name: release_year
+      in: query
+      schema: { type: integer }
+    Sort:
+      name: sort
+      in: query
+      schema:
+        type: string
+        enum: [newest, oldest, popularity, alphabetical]
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PlaylistIdPath:
+      name: playlist
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Success:
+      description: Success, no meaningful payload
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SuccessEnvelope" }
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthenticated:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: Authenticated, but not permitted to perform this action
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    TooManyRequests:
+      description: Rate limit exceeded (60/min guest, 300/min authenticated)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    SongList:
+      description: A plain list of songs
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/SuccessEnvelope"
+              - type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Song" }
+    PaginatedSongs:
+      description: A paginated list of songs
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PaginatedSongResponse" }
+    PaginatedArtists:
+      description: A paginated list of artists
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/SuccessEnvelope"
+              - $ref: "#/components/schemas/PaginationMeta"
+              - type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Artist" }
+    PaginatedAlbums:
+      description: A paginated list of albums
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/SuccessEnvelope"
+              - $ref: "#/components/schemas/PaginationMeta"
+              - type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Album" }
+
+  schemas:
+    SuccessEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        message: { type: string }
+      required: [success, message, data]
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string }
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+      required: [success, message, errors]
+
+    PaginationMeta:
+      type: object
+      properties:
+        pagination:
+          type: object
+          properties:
+            page: { type: integer }
+            limit: { type: integer }
+            total: { type: integer }
+            last_page: { type: integer }
+
+    PaginatedSongResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - $ref: "#/components/schemas/PaginationMeta"
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/Song" }
+
+    GlobalSearchResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                songs:
+                  type: array
+                  items: { $ref: "#/components/schemas/Song" }
+                artists:
+                  type: array
+                  items: { $ref: "#/components/schemas/Artist" }
+                albums:
+                  type: array
+                  items: { $ref: "#/components/schemas/Album" }
+                playlists:
+                  type: array
+                  items: { $ref: "#/components/schemas/Playlist" }
+
+    AuthenticatedEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                user: { $ref: "#/components/schemas/User" }
+                token: { type: string }
+                token_type: { type: string, example: Bearer }
+
+    User:
+      type: object
+      description: Never includes password, remember_token, or email_verified_at.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        avatar: { type: string, format: uri, nullable: true }
+        country: { type: string, nullable: true }
+        language: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Genre:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+
+    Language:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        code: { type: string }
+
+    Artist:
+      type: object
+      description: >
+        `albums_count`/`songs_count` appear only when the artist is the
+        primary entity in the response (list/show/related/trending) — never
+        when nested inside a song or album.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        bio: { type: string, nullable: true }
+        image: { type: string, format: uri, nullable: true }
+        country: { type: string, nullable: true }
+        popularity: { type: integer, minimum: 0, maximum: 100 }
+        albums_count: { type: integer, nullable: true }
+        songs_count: { type: integer, nullable: true }
+
+    Album:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        cover_image: { type: string, format: uri, nullable: true }
+        release_date: { type: string, format: date, nullable: true }
+        total_tracks: { type: integer }
+        popularity: { type: integer, minimum: 0, maximum: 100 }
+        artist: { $ref: "#/components/schemas/Artist" }
+        language: { $ref: "#/components/schemas/Language" }
+        tracks:
+          type: array
+          items: { $ref: "#/components/schemas/Song" }
+          description: Present only on GET /albums/{id}.
+
+    Song:
+      type: object
+      description: >
+        Never exposes artist_id/album_id/genre_id/language_id or any
+        provider-specific field — provider mappings never leave the
+        provider_*_mappings tables.
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        track_number: { type: integer, nullable: true, description: Position on its album; null for singles. }
+        duration: { type: integer, description: Seconds. }
+        isrc: { type: string, nullable: true }
+        release_date: { type: string, format: date, nullable: true }
+        popularity: { type: integer, minimum: 0, maximum: 100 }
+        preview_url: { type: string, format: uri, nullable: true }
+        external_url: { type: string, format: uri, nullable: true }
+        artist: { $ref: "#/components/schemas/Artist" }
+        album: { $ref: "#/components/schemas/Album" }
+        genre:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+        language:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+
+    PlaylistVisibility:
+      type: string
+      enum: [public, private, unlisted]
+      description: >
+        public: listed and readable by anyone. private: owner only.
+        unlisted: readable with the id, but never listed.
+
+    Playlist:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string, nullable: true }
+        cover_image: { type: string, format: uri, nullable: true }
+        visibility: { $ref: "#/components/schemas/PlaylistVisibility" }
+        tracks_count: { type: integer }
+        total_duration: { type: integer, description: Seconds. }
+        created_at: { type: string, format: date-time }
+        owner:
+          type: object
+          description: id and name only — never the owner's email.
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+        tracks:
+          type: array
+          items: { $ref: "#/components/schemas/Song" }
+          description: Present only on GET /playlists/{id}.
+
+    HistoryEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        played_at: { type: string, format: date-time }
+        ms_played: { type: integer, nullable: true }
+        song: { $ref: "#/components/schemas/Song" }
