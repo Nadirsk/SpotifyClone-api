@@ -4,16 +4,21 @@ declare(strict_types=1);
 
 use App\Http\Controllers\Api\V1\AlbumController;
 use App\Http\Controllers\Api\V1\ArtistController;
+use App\Http\Controllers\Api\V1\ArtistFollowController;
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\ConcertController;
 use App\Http\Controllers\Api\V1\FavoriteController;
 use App\Http\Controllers\Api\V1\GenreController;
 use App\Http\Controllers\Api\V1\HistoryController;
 use App\Http\Controllers\Api\V1\LanguageController;
 use App\Http\Controllers\Api\V1\PlaylistController;
 use App\Http\Controllers\Api\V1\ProfileController;
+use App\Http\Controllers\Api\V1\RecommendationController;
 use App\Http\Controllers\Api\V1\SearchController;
 use App\Http\Controllers\Api\V1\SongController;
 use App\Http\Controllers\Api\V1\TrendingController;
+use App\Http\Controllers\Api\V1\UserFollowController;
+use App\Http\Controllers\Api\V1\VenueController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -77,10 +82,17 @@ Route::prefix('songs')->group(function (): void {
 
 Route::prefix('artists')->group(function (): void {
     Route::get('/', [ArtistController::class, 'index']);
+    // Must precede /{id}, otherwise "followed" is read as an artist id and 404s.
+    Route::middleware('auth:sanctum')->get('followed', [ArtistFollowController::class, 'index']);
     Route::get('{id}', [ArtistController::class, 'show']);
     Route::get('{id}/albums', [ArtistController::class, 'albums']);
     Route::get('{id}/songs', [ArtistController::class, 'songs']);
     Route::get('{id}/related', [ArtistController::class, 'related']);
+
+    Route::middleware('auth:sanctum')->group(function (): void {
+        Route::post('{id}/follow', [ArtistFollowController::class, 'store']);
+        Route::delete('{id}/follow', [ArtistFollowController::class, 'destroy']);
+    });
 });
 
 Route::prefix('albums')->group(function (): void {
@@ -95,8 +107,27 @@ Route::prefix('trending')->group(function (): void {
     Route::get('albums', [TrendingController::class, 'albums']);
 });
 
+/*
+ | Personalized, so auth-gated unlike trending — see RecommendationService's
+ | docblock for why this is one endpoint (songs only) rather than three.
+ */
+Route::middleware('auth:sanctum')->get('recommendations', [RecommendationController::class, 'songs']);
+
 Route::get('genres', [GenreController::class, 'index']);
 Route::get('languages', [LanguageController::class, 'index']);
+
+/*
+|--------------------------------------------------------------------------
+| Live events — no source in 01-11 (see the concerts migration's docblock);
+| built on explicit request as first-party, seeded, public read-only data.
+|--------------------------------------------------------------------------
+*/
+
+Route::get('venues', [VenueController::class, 'index']);
+Route::prefix('concerts')->group(function (): void {
+    Route::get('/', [ConcertController::class, 'index']);
+    Route::get('{id}', [ConcertController::class, 'show']);
+});
 
 /*
 |--------------------------------------------------------------------------
@@ -118,6 +149,28 @@ Route::middleware('auth:sanctum')->prefix('playlists')->group(function (): void 
     Route::delete('{playlist}', [PlaylistController::class, 'destroy']);
     Route::post('{playlist}/songs', [PlaylistController::class, 'addSong']);
     Route::delete('{playlist}/songs/{song}', [PlaylistController::class, 'removeSong']);
+});
+
+/*
+|--------------------------------------------------------------------------
+| Public profiles and user-to-user following
+|--------------------------------------------------------------------------
+|
+| Not in 01-11's scope (see the user_follows migration's docblock) — built on
+| explicit request, following the same public-read / auth-mutation split as
+| playlists above.
+|
+*/
+
+Route::prefix('users')->group(function (): void {
+    Route::get('{id}', [UserFollowController::class, 'show']);
+    Route::get('{id}/followers', [UserFollowController::class, 'followers']);
+    Route::get('{id}/following', [UserFollowController::class, 'following']);
+
+    Route::middleware('auth:sanctum')->group(function (): void {
+        Route::post('{id}/follow', [UserFollowController::class, 'store']);
+        Route::delete('{id}/follow', [UserFollowController::class, 'destroy']);
+    });
 });
 
 /*

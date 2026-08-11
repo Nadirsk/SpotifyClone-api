@@ -7,6 +7,7 @@ namespace App\Models;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
@@ -71,5 +72,26 @@ class User extends Authenticatable
     public function oauthAccounts(): HasMany
     {
         return $this->hasMany(OauthAccount::class);
+    }
+
+    /**
+     * People who follow this user. `user_follows` is not a simple pivot —
+     * `follower_id`/`followed_id` are two different roles on the same table —
+     * so this and `following()` model the same table as two distinct
+     * relations rather than one ambiguous "users" relation.
+     *
+     * @return BelongsToMany<User, $this>
+     */
+    public function followers(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'user_follows', 'followed_id', 'follower_id')
+            ->withTimestamps();
+    }
+
+    /** @return BelongsToMany<User, $this> */
+    public function following(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'user_follows', 'follower_id', 'followed_id')
+            ->withTimestamps();
     }
 }

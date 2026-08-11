@@ -165,6 +165,22 @@ final class DatabaseSearchEngine implements SearchEngine
      * them in lets a user write a query that errors or that silently inverts the
      * search (a stray `-` excludes instead of includes).
      */
+    /**
+     * MySQL/InnoDB's built-in FULLTEXT stopword list
+     * (`INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD`). These are never
+     * written to the index, so marking one `+` (required) makes the whole
+     * boolean query unsatisfiable — "Die With A Smile" would otherwise match
+     * nothing at all, because "with" and "a" can never be found in the index
+     * regardless of how many rows actually contain them.
+     *
+     * @var list<string>
+     */
+    private const STOPWORDS = [
+        'a', 'about', 'an', 'are', 'as', 'at', 'be', 'by', 'com', 'de', 'en', 'for',
+        'from', 'how', 'i', 'in', 'is', 'it', 'la', 'of', 'on', 'or', 'that', 'the',
+        'this', 'to', 'und', 'was', 'what', 'when', 'where', 'who', 'will', 'with', 'www',
+    ];
+
     private function toBooleanTerm(string $term): string
     {
         $cleaned = preg_replace('/[+\-><()~*"@\\\\]+/u', ' ', $term) ?? '';
@@ -174,14 +190,25 @@ final class DatabaseSearchEngine implements SearchEngine
             static fn (string $word): bool => $word !== ''
         );
 
-        if ($words === []) {
+        // Stopwords are dropped rather than left optional: they were never
+        // written to the index, so requiring one is fatal to the whole query
+        // and leaving it optional would contribute nothing either way.
+        $significant = array_values(array_filter(
+            $words,
+            static fn (string $word): bool => ! in_array(mb_strtolower($word), self::STOPWORDS, true)
+        ));
+
+        // A query that is entirely stopwords ("a the") has nothing significant
+        // left to match on; matchText() falls back to a LIKE prefix on the raw
+        // term in that case.
+        if ($significant === []) {
             return '';
         }
 
-        // `+word*` = every word required, each matching as a prefix.
+        // `+word*` = every remaining word required, each matching as a prefix.
         return implode(' ', array_map(
             static fn (string $word): string => '+'.$word.'*',
-            $words
+            $significant
         ));
     }
 

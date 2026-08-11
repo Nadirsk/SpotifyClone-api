@@ -166,6 +166,22 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
         for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
             $this->throttle();
 
+            /*
+             | Debug-only visibility into what actually goes out on the wire —
+             | to check "did this search really hit the provider, and with
+             | what params" without attaching a debugger. Form values are
+             | never logged (see post()'s docblock: assumed to hold secrets),
+             | only which fields were sent.
+             */
+            $this->logger->debug('Provider request sending', [
+                'provider' => $this->key(),
+                'method' => $method,
+                'url' => $this->safeUrl($url),
+                'attempt' => $attempt,
+                'query' => $this->scrub($query),
+                'form_fields' => array_keys($form),
+            ]);
+
             try {
                 $request = Http::withHeaders($allHeaders)
                     ->timeout((int) $this->setting('timeout', 10))
@@ -270,10 +286,29 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
 
             $body = $response->json();
 
+            $this->logger->debug('Provider response received', [
+                'provider' => $this->key(),
+                'url' => $this->safeUrl($url),
+                'status' => $response->status(),
+                'body' => $this->truncatedBody($body),
+            ]);
+
             return is_array($body) ? $body : null;
         }
 
         return null;
+    }
+
+    /**
+     * A debug-only preview of a response body, capped so one huge payload
+     * (JioSaavn embeds full artist/image/download-url arrays per song) cannot
+     * blow up a single log line.
+     */
+    private function truncatedBody(mixed $body): string
+    {
+        $encoded = json_encode($body) ?: '[unencodable body]';
+
+        return mb_strlen($encoded) > 4000 ? mb_substr($encoded, 0, 4000).'…[truncated]' : $encoded;
     }
 
     /** Exponential backoff with up to 25% jitter, clamped to $maxDelay. */

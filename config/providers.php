@@ -119,15 +119,25 @@ return [
         // Mappings refreshed per provider per incremental run.
         'batch_size' => 200,
 
-        // Results requested per provider when a search misses locally.
-        'lazy_search_limit' => 10,
+        /*
+         | Results requested per provider on a live sync. Set to the adapter's
+         | own hard ceiling (JioSaavnAdapter::search() clamps to 50 regardless
+         | of what is asked for) rather than a smaller number: JioSaavn's own
+         | `total` for a query is frequently well under 50 (a specific song
+         | title, an obscure artist), and requesting fewer than that would
+         | mean missing real matches the provider already told us exist —
+         | not a rate-limit concern, since this is one search call either way,
+         | just a bigger page of the same response.
+         */
+        'lazy_search_limit' => 50,
 
         /*
-         | Minutes a missed search term is remembered before another lazy sync
-         | is allowed to fire for it. Without this, a term with genuinely zero
-         | local results would queue one LazySyncSearchJob per request while
-         | it trends — the debounce caps that at one dispatch per window
-         | regardless of how many people search it in the meantime.
+         | Minutes a search term is remembered before another live sync is
+         | allowed to fire for it. Every search with a term now calls the
+         | provider (SearchService::shouldSyncFromProvider()), not only a
+         | local miss, so without this a trending term would hit JioSaavn
+         | once per request — the debounce caps that at one live call per
+         | window regardless of how many people search it in the meantime.
          */
         'lazy_debounce_minutes' => 15,
 
@@ -237,8 +247,34 @@ return [
 
     'jiosaavn' => [
         'enabled' => (bool) env('JIOSAAVN_ENABLED', false),
-        'base_url' => env('JIOSAAVN_BASE_URL', 'https://saavn.dev/api'),
+        // saavn.dev, the wrapper's own documented default, does not resolve
+        // (confirmed dead 2026-08-07); saavn.sumit.co is the author's live one.
+        'base_url' => env('JIOSAAVN_BASE_URL', 'https://saavn.sumit.co/api'),
         // Undocumented and unofficial; conservative guess to stay polite.
         'rate_limit' => ['requests' => 5, 'per_seconds' => 1],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | iTunes — Apple's free public Search API, no authentication
+    |--------------------------------------------------------------------------
+    |
+    | Distinct from `apple` above: this is the free, keyless Search API
+    | (itunes.apple.com/search), not the paid Apple Music catalog API. It
+    | covers songs, albums and artists but publishes no popularity score and
+    | only a 30-second preview clip — there is no full-length field to map,
+    | unlike JioSaavn's `downloadUrl`.
+    |
+    */
+
+    'itunes' => [
+        'enabled' => (bool) env('ITUNES_ENABLED', false),
+        'base_url' => env('ITUNES_BASE_URL', 'https://itunes.apple.com'),
+        // The catalog skews Indian film/regional music; IN is the storefront
+        // that actually returns it (Apple defaults to US otherwise).
+        'country' => env('ITUNES_COUNTRY', 'us'),
+        // Apple's search endpoint is undocumented but informally tight;
+        // conservative on purpose. Sequential calls only — see class docblock.
+        'rate_limit' => ['requests' => 1, 'per_seconds' => 3],
     ],
 ];

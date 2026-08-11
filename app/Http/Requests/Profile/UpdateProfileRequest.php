@@ -34,7 +34,13 @@ final class UpdateProfileRequest extends FormRequest
                 Rule::unique('users', 'email')->ignore($user?->getKey()),
             ],
             'country' => ['nullable', 'string', 'size:2'],
-            'language' => ['nullable', 'string', 'max:10'],
+            /*
+             | Not nullable like `country`: the `users.language` column is
+             | NOT NULL with a default of 'en' (it drives SetLocale
+             | middleware), so a null here would reach the database as a raw
+             | constraint violation instead of a clean validation error.
+             */
+            'language' => ['sometimes', 'required', 'string', 'max:10'],
             'password' => ['sometimes', 'required', 'string', 'confirmed', Password::defaults()],
             'current_password' => [
                 /*

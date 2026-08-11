@@ -432,8 +432,16 @@ final class SyncService
      *
      * No mapping row is written for a stub: the song payload gives us the
      * album's title but not the provider's album ID, and a mapping without a
-     * trustworthy external ID would be a lie the next sync has to unpick. The
-     * album sync job fills in the real record and dedupe merges the two.
+     * trustworthy external ID would be a lie the next sync has to unpick.
+     *
+     * The exact-slug lookup runs first because it is the cheap, certain
+     * answer; the deduplicator's fuzzy core-title match runs before stubbing
+     * a new row because a song's own `album` string frequently lacks a
+     * qualifier the real synced album title carries ("Aashiqui 2" vs
+     * "Aashiqui 2 (Original Motion Picture Soundtrack)") — without this, that
+     * mismatch alone was the single biggest source of duplicate albums,
+     * stubbing a near-copy on nearly every song synced against an album that
+     * already exists under its fuller title.
      */
     private function resolveAlbumForSong(ProviderSongData $data, Artist $artist): ?Album
     {
@@ -451,6 +459,13 @@ final class SyncService
             ->where('slug', $slug)
             ->where('artist_id', $artist->getKey())
             ->first();
+
+        if ($album !== null) {
+            return $album;
+        }
+
+        $album = $this->deduplicator->albumByCoreTitle($data->album, $artist)
+            ?? $this->deduplicator->albumByCoreTitleAnyArtist($data->album);
 
         if ($album !== null) {
             return $album;

@@ -71,16 +71,36 @@ the queues (`sync`, `search`, `notifications`, `recommendations`, `default`) at 
 
 ## 4. Live provider sync
 
-**Status:** adapters built, credentials absent.
-**Why:** no API keys available yet.
+**Status:** JioSaavn and iTunes are live (2026-08-07); the rest still need
+credentials.
+**Why:** these two need no API key at all — everything else (Spotify, the
+paid Apple Music catalog API, MusicBrainz, Last.fm) does, and none are
+available yet.
 **Docs:** `11_PROVIDER_INTEGRATION`.
 
-All five adapters implement `App\Contracts\Providers\ProviderAdapter`. Every
-provider is disabled by default (`*_ENABLED=false`) so nothing calls out to the
-network until it is configured. Development data comes from the seeders instead.
+Six adapters implement `App\Contracts\Providers\ProviderAdapter`:
+`App\Services\Providers\JioSaavn\JioSaavnAdapter` (community wrapper around
+JioSaavn's own catalog — no official API exists) and
+`App\Services\Providers\ITunes\ITunesSearchAdapter` (Apple's free public
+Search API — distinct from the paid `AppleMusicAdapter` below) are enabled
+(`JIOSAAVN_ENABLED=true`, `ITUNES_ENABLED=true`). Every other provider stays
+disabled by default (`*_ENABLED=false`) so nothing calls out to the network
+until it is configured.
 
-To enable one: fill its credentials in `.env`, set `*_ENABLED=true`, and confirm
-its row in the `providers` table is enabled.
+The catalog's initial content came from `php artisan catalog:bootstrap`
+(`app/Console/Commands/BootstrapCatalog.php`) — a one-off command that runs a
+curated search-term list through every enabled adapter, because the
+incremental jobs (`SyncSongsJob` etc.) only refresh mappings that already
+exist and `LazySyncSearchJob` only fires on a live search miss; neither
+discovers new content from an empty catalog on its own. The dev-fixture
+catalog from `CatalogSeeder` (~40 placeholder artists) has been cleared now
+that real data exists, since its static `trending_score` values otherwise
+outranked every real synced song on `/trending`.
+
+To enable another provider: fill its credentials in `.env`, set
+`*_ENABLED=true`, confirm its row in the `providers` table is enabled, and run
+`catalog:bootstrap` again (or wait for a lazy-sync search miss) to give it
+something to sync.
 
 ---
 

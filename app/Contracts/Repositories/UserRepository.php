@@ -13,6 +13,9 @@ interface UserRepository
 
     public function findByEmail(string $email): ?User;
 
+    /** @throws \Illuminate\Database\Eloquent\ModelNotFoundException */
+    public function findOrFail(string $id): User;
+
     /** @param  array<string, mixed>  $attributes */
     public function update(User $user, array $attributes): User;
 

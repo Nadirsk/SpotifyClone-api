@@ -32,6 +32,7 @@ return [
             'artist' => (int) env('CACHE_TTL_ARTIST', 3600),
             'album' => (int) env('CACHE_TTL_ALBUM', 3600),
             'song' => (int) env('CACHE_TTL_SONG', 3600),
+            'recommendations' => (int) env('CACHE_TTL_RECOMMENDATIONS', 1800),
         ],
     ],
 

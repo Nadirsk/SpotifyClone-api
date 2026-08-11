@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Models\User;
+use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
@@ -21,6 +23,7 @@ class AppServiceProvider extends ServiceProvider
     {
         $this->configureRateLimiting();
         $this->configureModels();
+        $this->configurePasswordResetUrl();
     }
 
     /**
@@ -55,5 +58,23 @@ class AppServiceProvider extends ServiceProvider
          */
         Model::preventLazyLoading(! app()->isProduction());
         Model::preventSilentlyDiscardingAttributes(! app()->isProduction());
+    }
+
+    /**
+     * Without this, `ResetPassword::toMail()` falls back to `route('password.reset', ...)`,
+     * which does not exist in this API-only app — this app has no Blade reset
+     * form, the Next.js frontend does — so link generation would throw and
+     * `AuthService::forgotPassword()`'s catch would silently swallow it,
+     * leaving no usable link in the email (or, locally, the log) at all.
+     * `cors.allowed_origins.0` is reused rather than a second env read because
+     * it is already this app's one source of truth for "where the frontend is."
+     */
+    private function configurePasswordResetUrl(): void
+    {
+        ResetPassword::createUrlUsing(function (User $user, string $token): string {
+            $frontendUrl = rtrim((string) config('cors.allowed_origins.0'), '/');
+
+            return "{$frontendUrl}/reset-password?token={$token}&email=".urlencode($user->email);
+        });
     }
 }
