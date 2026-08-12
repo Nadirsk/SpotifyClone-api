@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\V1\FavoriteController;
 use App\Http\Controllers\Api\V1\GenreController;
 use App\Http\Controllers\Api\V1\HistoryController;
 use App\Http\Controllers\Api\V1\LanguageController;
+use App\Http\Controllers\Api\V1\OtpController;
 use App\Http\Controllers\Api\V1\PlaylistController;
 use App\Http\Controllers\Api\V1\ProfileController;
 use App\Http\Controllers\Api\V1\RecommendationController;
@@ -48,6 +49,16 @@ Route::prefix('auth')->group(function (): void {
 
     Route::get('google', [AuthController::class, 'googleRedirect']);
     Route::get('google/callback', [AuthController::class, 'googleCallback']);
+
+    /*
+     | Phone sign-up's OTP send/verify. Not in 05_API_SPECIFICATION — see the
+     | phone sign-up screens' docblock. `otp-send` is far tighter than the
+     | global `api` limiter (05_API_SPECIFICATION §17): that one is generous
+     | enough to let an attacker spray a few hundred real SMS sends a minute,
+     | and every one of those costs real money.
+     */
+    Route::post('otp/send', [OtpController::class, 'send'])->middleware('throttle:otp-send');
+    Route::post('otp/verify', [OtpController::class, 'verify'])->middleware('throttle:otp-verify');
 
     Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('logout', [AuthController::class, 'logout']);

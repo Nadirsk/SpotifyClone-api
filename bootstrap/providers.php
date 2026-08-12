@@ -7,6 +7,7 @@ use App\Providers\AuthServiceProvider;
 use App\Providers\ProviderIntegrationServiceProvider;
 use App\Providers\RepositoryServiceProvider;
 use App\Providers\SearchServiceProvider;
+use App\Providers\SmsServiceProvider;
 
 return [
     AppServiceProvider::class,
@@ -14,4 +15,5 @@ return [
     RepositoryServiceProvider::class,
     SearchServiceProvider::class,
     ProviderIntegrationServiceProvider::class,
+    SmsServiceProvider::class,
 ];
