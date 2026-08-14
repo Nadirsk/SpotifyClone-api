@@ -23,6 +23,7 @@ class User extends Authenticatable
     protected $fillable = [
         'name',
         'email',
+        'phone',
         'password',
         'avatar',
         'country',
@@ -72,6 +73,12 @@ class User extends Authenticatable
     public function oauthAccounts(): HasMany
     {
         return $this->hasMany(OauthAccount::class);
+    }
+
+    /** @return HasMany<EmailLoginCode, $this> */
+    public function emailLoginCodes(): HasMany
+    {
+        return $this->hasMany(EmailLoginCode::class);
     }
 
     /**

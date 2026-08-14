@@ -60,6 +60,25 @@ Route::prefix('auth')->group(function (): void {
     Route::post('otp/send', [OtpController::class, 'send'])->middleware('throttle:otp-send');
     Route::post('otp/verify', [OtpController::class, 'verify'])->middleware('throttle:otp-verify');
 
+    // The phone flow's actual account creation — same shape as `register`
+    // above, gated on OtpService::wasRecentlyVerified() instead of a password.
+    Route::post('register/phone', [AuthController::class, 'registerWithPhone']);
+    // Same OTP gate, but for signing an *existing* phone-native account back
+    // in — see AuthService::loginWithPhone() for why this never creates one.
+    Route::post('login/phone', [AuthController::class, 'loginWithPhone']);
+
+    /*
+     | Passwordless email login — the email counterpart to the phone OTP
+     | routes above. `send` is deliberately as generous here as `otp-send`
+     | for the same reason: every real send costs an SMTP round-trip, so the
+     | route-level limiter exists to blunt a flood, while EmailLoginCodeService
+     | itself enforces the tighter per-address limit.
+     */
+    Route::post('login/email/send-code', [AuthController::class, 'sendEmailLoginCode'])
+        ->middleware('throttle:email-login-send');
+    Route::post('login/email/verify-code', [AuthController::class, 'verifyEmailLoginCode'])
+        ->middleware('throttle:email-login-verify');
+
     Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('logout', [AuthController::class, 'logout']);
         Route::get('me', [AuthController::class, 'me']);

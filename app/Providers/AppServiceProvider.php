@@ -71,6 +71,14 @@ class AppServiceProvider extends ServiceProvider
         RateLimiter::for('otp-verify', function (Request $request): Limit {
             return Limit::perMinutes(10, 15)->by((string) $request->ip());
         });
+
+        RateLimiter::for('email-login-send', function (Request $request): Limit {
+            return Limit::perMinutes(10, 30)->by((string) $request->ip());
+        });
+
+        RateLimiter::for('email-login-verify', function (Request $request): Limit {
+            return Limit::perMinutes(10, 15)->by((string) $request->ip());
+        });
     }
 
     private function configureModels(): void

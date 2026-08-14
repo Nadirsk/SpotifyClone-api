@@ -47,10 +47,11 @@ return [
      | Technology scrubbing) is an Indian telecom-regulatory requirement, so a
      | number outside +91 will never actually deliver through this vendor.
      |
-     | `bypass_phone`/`bypass_otp` exist so this can be exercised — in dev or
-     | in front of a reviewer — without spending real SMS credits on every
-     | attempt. Leave both blank to disable the bypass entirely (e.g. in
-     | production).
+     | `bypass_phone`/`bypass_otp` fix the OTP for one test number so a
+     | reviewer always knows the code without reading the SMS — that number
+     | still gets a real message through the vendor like anyone else, it
+     | just skips the verify-attempt throttle. Leave both blank to disable
+     | the bypass entirely (e.g. in production).
      */
     'textsms' => [
         'endpoint' => env('SMS_ENDPOINT', 'http://textsms.thetechmore.in/http-tokenkeyapi.php'),

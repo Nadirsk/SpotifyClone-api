@@ -6,6 +6,7 @@ namespace App\Services\Auth;
 
 use App\Contracts\Sms\SmsGateway;
 use App\Models\PhoneOtp;
+use App\Models\User;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Validation\ValidationException;
@@ -61,24 +62,22 @@ final class OtpService
      */
     public function send(string $phone): void
     {
-        $bypass = $this->isBypassPhone($phone);
         $key = $this->rateLimitKey('send', $phone);
 
-        if (! $bypass && RateLimiter::tooManyAttempts($key, self::SEND_MAX_ATTEMPTS)) {
+        if (RateLimiter::tooManyAttempts($key, self::SEND_MAX_ATTEMPTS)) {
             throw ValidationException::withMessages(['phone' => [self::THROTTLED]]);
         }
 
-        if (! $bypass) {
-            RateLimiter::hit($key, self::SEND_DECAY_SECONDS);
-        }
+        RateLimiter::hit($key, self::SEND_DECAY_SECONDS);
 
         $otp = $this->generate($phone);
 
-        // The bypass phone never touches the real vendor at all — that is the
-        // "without spending real SMS credits on every attempt" config promise;
-        // stopping at the throttle above but still paying for a vendor call
-        // would only half-deliver it.
-        $sent = $bypass || $this->gateway->send($phone, $this->message($otp));
+        // The bypass phone now goes through the real vendor like any other
+        // number — it only keeps a fixed OTP (see generate()) so a tester
+        // still knows the code without reading the SMS. It is no longer
+        // exempt from the send throttle either: it costs a real credit now,
+        // so it needs the same abuse guard everyone else gets.
+        $sent = $this->gateway->send($phone, $this->message($otp));
 
         if (! $sent) {
             throw ValidationException::withMessages(['phone' => [self::SEND_FAILED]]);
@@ -104,9 +103,10 @@ final class OtpService
      */
     public function verify(string $phone, string $code): void
     {
+        $bypass = $this->isBypassPhone($phone);
         $key = $this->rateLimitKey('verify', $phone);
 
-        if (RateLimiter::tooManyAttempts($key, self::VERIFY_MAX_ATTEMPTS)) {
+        if (! $bypass && RateLimiter::tooManyAttempts($key, self::VERIFY_MAX_ATTEMPTS)) {
             throw ValidationException::withMessages(['otp' => [self::THROTTLED]]);
         }
 
@@ -119,7 +119,9 @@ final class OtpService
             ->first();
 
         if ($record === null || ! Hash::check($code, $record->otp_hash)) {
-            RateLimiter::hit($key, self::VERIFY_DECAY_SECONDS);
+            if (! $bypass) {
+                RateLimiter::hit($key, self::VERIFY_DECAY_SECONDS);
+            }
 
             throw ValidationException::withMessages(['otp' => [self::INVALID_OR_EXPIRED]]);
         }
@@ -146,25 +148,46 @@ final class OtpService
     }
 
     /**
+     * Backfills `user_id` on every `phone_otps` row for `$phone` once
+     * registration actually lands — see the create-table migration's own
+     * comment for why that column starts out null. Called once, right after
+     * the account is created.
+     */
+    public function linkToUser(string $phone, User $user): void
+    {
+        PhoneOtp::query()->where('phone', $phone)->update(['user_id' => $user->id]);
+    }
+
+    /**
      * The one fixed (phone, code) pair — configured, not hardcoded, so it
      * costs nothing to disable in production and nothing in source ties this
      * class to any one person's real number.
      */
     private function generate(string $phone): string
     {
-        $bypassPhone = config('services.textsms.bypass_phone');
-        $bypassOtp = config('services.textsms.bypass_otp');
-
-        if (is_string($bypassPhone) && $bypassPhone !== '' && hash_equals($bypassPhone, $phone)) {
-            return (string) $bypassOtp;
+        if ($this->isBypassPhone($phone)) {
+            return (string) config('services.textsms.bypass_otp');
         }
 
         return (string) random_int(self::OTP_LENGTH_MIN, self::OTP_LENGTH_MAX);
     }
 
+    /**
+     * Whether `$phone` is the one configured (phone, code) test pair —
+     * checked here rather than inline everywhere it matters (`generate()`
+     * and `verify()`'s throttle skip) so those stay in lockstep instead of
+     * separate `hash_equals` calls drifting apart.
+     */
+    private function isBypassPhone(string $phone): bool
+    {
+        $bypassPhone = config('services.textsms.bypass_phone');
+
+        return is_string($bypassPhone) && $bypassPhone !== '' && hash_equals($bypassPhone, $phone);
+    }
+
     private function message(string $otp): string
     {
-        return "Dear User, Your OTP for Resonance registration is {$otp}. Please use this OTP to complete your registration. Do not share this OTP with anyone.";
+        return "Dear User, Your OTP for Aaibuzz registration is {$otp}. Please use this OTP to complete your registration. Do not share this OTP with anyone.";
     }
 
     /** Bucketed by phone alone: unlike login, there is no second dimension (an email) to combine it with. */
