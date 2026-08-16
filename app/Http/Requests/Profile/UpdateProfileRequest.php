@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Requests\Profile;
 
+use App\Enums\AudioQuality;
 use App\Models\User;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Arr;
@@ -41,6 +42,15 @@ final class UpdateProfileRequest extends FormRequest
              | constraint violation instead of a clean validation error.
              */
             'language' => ['sometimes', 'required', 'string', 'max:10'],
+            /*
+             | Accepted from any plan, free included. This is the listener's
+             | preference, and the plan ceiling is applied when the stream is
+             | resolved (SubscriptionService::effectiveQualityFor) — rejecting
+             | `very_high` here would mean a listener who upgrades has to go
+             | back and set it again, and a listener who lapses loses it.
+             */
+            'audio_quality' => ['sometimes', 'required', 'string', Rule::in(AudioQuality::values())],
+            'offline_enabled' => ['sometimes', 'boolean'],
             'password' => ['sometimes', 'required', 'string', 'confirmed', Password::defaults()],
             'current_password' => [
                 /*

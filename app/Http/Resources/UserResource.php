@@ -32,6 +32,15 @@ final class UserResource extends JsonResource
             'avatar' => $this->avatar,
             'country' => $this->country,
             'language' => $this->language,
+            /*
+             | The listener's *preferred* tier, not the one they will actually
+             | be served — that depends on their plan and is reported by
+             | `GET /subscription` as `effective_audio_quality`. Two fields
+             | rather than one because the settings screen has to render the
+             | preference even while the plan is clamping it.
+             */
+            'audio_quality' => $this->audio_quality?->value,
+            'offline_enabled' => (bool) $this->offline_enabled,
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }

@@ -112,6 +112,26 @@ final class ProviderManager
     }
 
     /**
+     * Enabled adapters that would answer *right now*, in priority order —
+     * skipping any whose circuit has tripped or which is parked after a rate
+     * limit (`ProviderAdapter::isAvailable()`).
+     *
+     * `enabled()` is the right question for "should this provider exist in this
+     * run at all"; this is the right question before committing to work that
+     * only pays off if a call actually goes out — queueing a job, or spending a
+     * debounce slot that then blocks the term for the next quarter of an hour.
+     *
+     * @return list<ProviderAdapter>
+     */
+    public function available(): array
+    {
+        return array_values(array_filter(
+            $this->enabled(),
+            static fn (ProviderAdapter $adapter): bool => $adapter->isAvailable(),
+        ));
+    }
+
+    /**
      * The `providers` row backing an adapter — the sync engine needs its ID to
      * write mapping records.
      */

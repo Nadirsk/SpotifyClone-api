@@ -7,6 +7,7 @@ namespace App\Contracts\Providers;
 use App\DTO\Providers\ProviderAlbumData;
 use App\DTO\Providers\ProviderArtistData;
 use App\DTO\Providers\ProviderSongData;
+use App\Exceptions\ProviderUnavailableException;
 
 /**
  * The one shape every external metadata provider is reduced to
@@ -18,12 +19,23 @@ use App\DTO\Providers\ProviderSongData;
  * normalized DTOs, never raw provider payloads, so a provider schema can never
  * reach the catalog tables or a client.
  *
- * Implementations must not throw on transport failure. A dead provider, a
- * rate-limited provider and a provider missing credentials all resolve to an
- * empty list or null, so one sick provider degrades a sync run instead of
- * failing it. `authenticate()` is the single exception: it throws when the
- * adapter is enabled but misconfigured, because that is an operator error the
- * logs should not swallow.
+ * Implementations answer in exactly one of three ways, and callers must treat
+ * the last two differently:
+ *
+ * 1. **Data** — the provider had the record.
+ * 2. **Empty list / null** — the provider answered, and there is no such
+ *    record. Believe it.
+ * 3. **{@see ProviderUnavailableException}** — the provider never answered:
+ *    rate limited, circuit open, or unreachable after every retry. This says
+ *    nothing about whether the record exists, so a caller must fall back to
+ *    local data and must never persist or cache it as an absence.
+ *
+ * Callers are expected to catch (3) at the provider boundary. Nothing above
+ * this interface — no controller, and certainly no listener pressing play —
+ * should ever be able to tell that a metadata provider is having a bad day.
+ *
+ * `authenticate()` throws separately when the adapter is enabled but
+ * misconfigured, because that is an operator error the logs should not swallow.
  */
 interface ProviderAdapter
 {
@@ -38,6 +50,17 @@ interface ProviderAdapter
      * it needs is present. Guards every outbound call.
      */
     public function isEnabled(): bool;
+
+    /**
+     * True when the provider is enabled *and* would actually answer right now —
+     * its circuit is closed and it is not parked after a rate limit.
+     *
+     * Distinct from `isEnabled()` because it changes minute to minute rather
+     * than per deploy. Callers use it to avoid *scheduling* work that would only
+     * be suppressed: a fetch is free to attempt this and find out, but queueing
+     * a job, or spending a once-per-15-minutes debounce slot, is not.
+     */
+    public function isAvailable(): bool;
 
     /**
      * Acquire (or refresh) whatever credential the provider needs for

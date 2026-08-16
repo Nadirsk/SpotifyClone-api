@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Enums\AudioQuality;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -28,6 +29,10 @@ class User extends Authenticatable
         'avatar',
         'country',
         'language',
+        // A *preference*, clamped to the plan's ceiling at read time rather
+        // than on write — see SubscriptionService::effectiveQualityFor().
+        'audio_quality',
+        'offline_enabled',
     ];
 
     /** @var list<string> */
@@ -42,13 +47,40 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'audio_quality' => AudioQuality::class,
+            'offline_enabled' => 'boolean',
         ];
+    }
+
+    /**
+     * Every subscription this account has ever held, newest first — a history,
+     * not a single current row. `SubscriptionService` is what interprets it;
+     * nothing should read this relation to decide entitlement.
+     *
+     * @return HasMany<Subscription, $this>
+     */
+    public function subscriptions(): HasMany
+    {
+        return $this->hasMany(Subscription::class)->orderByDesc('created_at');
     }
 
     /** @return HasMany<Playlist, $this> */
     public function playlists(): HasMany
     {
         return $this->hasMany(Playlist::class);
+    }
+
+    /**
+     * Playlists this user was invited to collaborate on — never ones they own.
+     * `Playlist::scopeVisibleTo()` is the read path a page actually uses; this
+     * exists for the inverse lookup (e.g. cleanup, admin tooling).
+     *
+     * @return BelongsToMany<Playlist, $this>
+     */
+    public function collaboratingPlaylists(): BelongsToMany
+    {
+        return $this->belongsToMany(Playlist::class, 'playlist_collaborators')
+            ->withTimestamps();
     }
 
     /** @return HasMany<Favorite, $this> */

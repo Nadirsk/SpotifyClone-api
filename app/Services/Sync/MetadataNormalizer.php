@@ -11,6 +11,7 @@ use App\Models\Album;
 use App\Models\Artist;
 use App\Models\Genre;
 use App\Models\Language;
+use App\Services\Catalog\SoundtrackParser;
 use Illuminate\Support\Str;
 
 /**
@@ -65,6 +66,10 @@ final class MetadataNormalizer
         'greek' => 'el',
     ];
 
+    public function __construct(
+        private readonly SoundtrackParser $soundtracks,
+    ) {}
+
     /**
      * Column values for a `songs` row.
      *
@@ -81,6 +86,15 @@ final class MetadataNormalizer
             'genre_id' => $genre?->getKey(),
             'language_id' => $language?->getKey(),
             'title' => $this->trim($data->title),
+            /*
+             | Derived from the title, not supplied by any provider — see
+             | SoundtrackParser. Null for the ~90% of the catalog that is not
+             | film music, which SyncService::writeEntity() then drops, so a
+             | re-sync never clears a film title it simply failed to re-derive.
+             | The repair path for a genuinely-changed title is
+             | `catalog:parse-soundtracks --fresh`.
+             */
+            'film_title' => $this->soundtracks->filmFrom($data->title),
             'slug' => Str::slug($data->title),
             /*
              | Passed through as null, NOT coerced to 0: the column is NOT NULL
@@ -130,6 +144,9 @@ final class MetadataNormalizer
             'artist_id' => $artist->getKey(),
             'language_id' => $language?->getKey(),
             'title' => $this->trim($data->title),
+            // An album title rarely carries the credit its tracks do;
+            // `catalog:parse-soundtracks` fills the rest in from the tracklist.
+            'film_title' => $this->soundtracks->filmFrom($data->title),
             'slug' => Str::slug($data->title),
             'cover_image' => $data->image,
             'release_date' => $data->releaseDate,

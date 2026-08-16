@@ -10,6 +10,7 @@ use App\Models\Album;
 use App\Models\Artist;
 use App\Models\Genre;
 use App\Models\Language;
+use App\Services\Catalog\SoundtrackParser;
 use App\Services\Sync\MetadataNormalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -29,7 +30,7 @@ class MetadataNormalizerTest extends TestCase
     {
         parent::setUp();
 
-        $this->normalizer = new MetadataNormalizer;
+        $this->normalizer = new MetadataNormalizer(new SoundtrackParser);
     }
 
     public function test_resolve_language_folds_a_2_letter_code_a_639_3_code_and_an_english_name_to_one_row(): void

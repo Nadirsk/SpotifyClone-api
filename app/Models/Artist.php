@@ -8,6 +8,7 @@ use Database\Factories\ArtistFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
@@ -48,6 +49,20 @@ class Artist extends Model
     public function songs(): HasMany
     {
         return $this->hasMany(Song::class);
+    }
+
+    /**
+     * The listeners following this artist.
+     *
+     * Added for `NotifyFollowersOfRelease`'s fan-out — the inverse direction
+     * (`User`'s followed artists) already existed via `ArtistFollowRepository`,
+     * but announcing a release needs to walk it this way round.
+     *
+     * @return BelongsToMany<User, $this>
+     */
+    public function followers(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'artist_follows')->withTimestamps();
     }
 
     /** @return HasMany<ProviderArtistMapping, $this> */

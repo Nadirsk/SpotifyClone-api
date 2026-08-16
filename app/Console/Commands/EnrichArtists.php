@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Exceptions\ProviderUnavailableException;
 use App\Models\Artist;
 use App\Services\Providers\ProviderManager;
 use App\Services\Sync\SyncService;
@@ -70,6 +71,18 @@ final class EnrichArtists extends Command
         $enriched = 0;
 
         foreach ($artists as $artist) {
+            /*
+             | Two calls per artist against a provider that is parked behind a
+             | rate limit is a few thousand guaranteed-null calls on a full
+             | backlog, and a "Done. Enriched 0/900" that says nothing about
+             | why. Stop at the first artist where no provider will answer.
+             */
+            if ($this->providers->available() === []) {
+                $this->warn('Paused: every provider is rate-limited or has an open circuit. Rerun later to continue.');
+
+                break;
+            }
+
             foreach ($adapters as $adapter) {
                 $record = $this->providers->record($adapter->key());
 
@@ -77,16 +90,25 @@ final class EnrichArtists extends Command
                     continue;
                 }
 
-                $match = $adapter->searchArtists($artist->name, 1)[0] ?? null;
+                try {
+                    $match = $adapter->searchArtists($artist->name, 1)[0] ?? null;
 
-                // Only trust the match if it is the same name, not merely
-                // the closest one the search ranked first — a stub named
-                // "Roy" should not get enriched with a same-search "Roy Kapur".
-                if ($match === null || Str::slug($match->name) !== $artist->slug) {
-                    continue;
+                    // Only trust the match if it is the same name, not merely
+                    // the closest one the search ranked first — a stub named
+                    // "Roy" should not get enriched with a same-search "Roy Kapur".
+                    if ($match === null || Str::slug($match->name) !== $artist->slug) {
+                        continue;
+                    }
+
+                    $detail = $adapter->getArtist($match->externalId);
+                } catch (ProviderUnavailableException $exception) {
+                    // Availability was checked before this artist, so getting
+                    // here means the provider went away mid-backlog. Stop
+                    // rather than walk the remaining rows into a closed door.
+                    $this->warn("Paused: {$exception->reason} ({$adapter->key()}). Rerun later to continue.");
+
+                    break 2;
                 }
-
-                $detail = $adapter->getArtist($match->externalId);
 
                 if ($detail === null) {
                     continue;

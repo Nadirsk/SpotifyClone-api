@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Contracts\Providers\ProviderAdapter;
 use App\DTO\Providers\ProviderArtistData;
+use App\Exceptions\ProviderUnavailableException;
 use App\Services\Providers\ProviderManager;
 use App\Services\Sync\SyncService;
 use Illuminate\Console\Command;
@@ -94,24 +95,53 @@ final class BootstrapCatalog extends Command
             $this->info("--- {$adapter->key()} ---");
 
             foreach (self::TERMS as $term) {
-                $songs = $this->sync->syncSongs($record, $adapter->searchSongs($term, $limit));
-                $artists = $this->sync->syncArtists($record, $this->detailed($adapter, $term, $limit));
+                /*
+                 | A provider parked behind a rate limit (or with an open
+                 | circuit) answers every call below with an immediate null, so
+                 | carrying on would scroll the whole term list past reporting
+                 | zeroes — which reads as "this provider has no catalog" rather
+                 | than "this provider told us to stop". Say which it is.
+                 */
+                if (! $adapter->isAvailable()) {
+                    $this->warn("  paused: {$adapter->key()} is rate-limited or its circuit is open. Rerun later to continue.");
 
+                    break;
+                }
+
+                $songs = 0;
+                $artists = 0;
                 $albums = 0;
                 $albumTracks = 0;
 
-                foreach ($adapter->searchAlbums($term, $limit) as $albumData) {
-                    $album = $this->sync->syncAlbum($record, $albumData);
+                try {
+                    $songs = $this->sync->syncSongs($record, $adapter->searchSongs($term, $limit));
+                    $artists = $this->sync->syncArtists($record, $this->detailed($adapter, $term, $limit));
 
-                    if ($album === null) {
-                        continue;
+                    foreach ($adapter->searchAlbums($term, $limit) as $albumData) {
+                        $album = $this->sync->syncAlbum($record, $albumData);
+
+                        if ($album === null) {
+                            continue;
+                        }
+
+                        $albums++;
+
+                        if ($fetchesTracks) {
+                            $albumTracks += $this->sync->syncSongs($record, $adapter->albumTracks($albumData->externalId));
+                        }
                     }
+                } catch (ProviderUnavailableException $exception) {
+                    /*
+                     | The check above only catches a provider that was already
+                     | parked when the term started; this catches the far more
+                     | likely case of it happening partway through, since one
+                     | term is dozens of calls. Everything synced so far is
+                     | committed and the run is idempotent, so stopping here
+                     | costs nothing but the remaining terms.
+                     */
+                    $this->warn("  paused mid-term: {$exception->reason} ({$adapter->key()}). Rerun later to continue.");
 
-                    $albums++;
-
-                    if ($fetchesTracks) {
-                        $albumTracks += $this->sync->syncSongs($record, $adapter->albumTracks($albumData->externalId));
-                    }
+                    break;
                 }
 
                 $totals['songs'] += $songs + $albumTracks;

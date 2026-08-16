@@ -25,6 +25,9 @@ class Song extends Model
         'genre_id',
         'language_id',
         'title',
+        // Parsed out of `title` by SoundtrackParser, not supplied by any
+        // provider. Null for everything that is not film music.
+        'film_title',
         'slug',
         'track_number',
         'duration',

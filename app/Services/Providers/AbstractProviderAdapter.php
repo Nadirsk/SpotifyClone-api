@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Services\Providers;
 
 use App\Contracts\Providers\ProviderAdapter;
+use App\Exceptions\ProviderUnavailableException;
+use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
@@ -21,10 +24,31 @@ use Psr\Log\LoggerInterface;
  * A subclass supplies its key, its credential check and its response mapping,
  * and gets a network layer that cannot hammer a dead provider.
  *
- * Failure policy: transport problems never escape this class. `send()` logs and
- * returns null, so a subclass returns `[]`/`null` and the caller carries on.
- * Only a misconfiguration — enabled but no usable credential — throws, and only
- * from `authenticate()`, because that is an operator error worth surfacing.
+ * Two separate mechanisms keep a struggling provider from being hammered, and
+ * they are deliberately not the same thing:
+ *
+ * - the **circuit breaker** answers "this provider is broken" (connection
+ *   failures, 5xx, rejected credentials) and trips after N consecutive strikes;
+ * - the **rate-limit cooldown** answers "this provider asked us to stop", and
+ *   trips on the very first 429 because a 429 is not ambiguous — the provider
+ *   has already told us the answer, and a retry is just a second refusal.
+ *
+ * Failure policy: two outcomes, kept strictly apart.
+ *
+ * - **The provider answered and had no record** (404, or JioSaavn's
+ *   `success: false`): `send()` returns null. That is a believable fact about
+ *   the catalog and the caller should act on it.
+ * - **The provider did not answer** (429, open circuit, shed by our own
+ *   throttle, or unreachable after every retry): `send()` throws
+ *   {@see ProviderUnavailableException}. It is *not* evidence that the record
+ *   is missing, and a caller must fall back to local data rather than record an
+ *   absence it never actually observed.
+ *
+ * Returning null for both — which this class used to do — is what lets an
+ * upstream outage masquerade as an empty catalog.
+ *
+ * Separately, a misconfiguration (enabled but no usable credential) throws from
+ * `authenticate()`, because that is an operator error worth surfacing loudly.
  */
 abstract class AbstractProviderAdapter implements ProviderAdapter
 {
@@ -60,6 +84,20 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
     public function isEnabled(): bool
     {
         return $this->setting('enabled') === true && $this->hasCredentials();
+    }
+
+    /**
+     * True when a request made right now would actually be attempted rather
+     * than short-circuited by `send()`'s two gates.
+     *
+     * Reads the same shared cache entries `send()` does, so this is an honest
+     * answer across processes and not just this worker's opinion.
+     */
+    public function isAvailable(): bool
+    {
+        return $this->isEnabled()
+            && ! $this->circuitIsOpen()
+            && $this->rateLimitCooldownRemainingMs() === 0;
     }
 
     /** Public APIs need nothing; token-based adapters override this. */
@@ -103,12 +141,14 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
     }
 
     /**
-     * GET a provider endpoint and return the decoded body, or null on any
-     * failure the caller cannot do anything about.
+     * GET a provider endpoint and return the decoded body, or null when the
+     * provider answered that there is no such record.
      *
      * @param  array<string, scalar|null>  $query
      * @param  array<string, string>  $headers
      * @return array<array-key, mixed>|null
+     *
+     * @throws ProviderUnavailableException when the provider did not answer.
      */
     protected function get(string $url, array $query = [], array $headers = []): ?array
     {
@@ -140,6 +180,9 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
      * @param  array<string, scalar|null>  $form
      * @param  array<string, string>  $headers
      * @return array<array-key, mixed>|null
+     *
+     * @throws ProviderUnavailableException when the provider never answered —
+     *                                      see the class docblock on why that is not the same as a null return.
      */
     private function send(string $method, string $url, array $query, array $form, array $headers): ?array
     {
@@ -149,14 +192,19 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
             return null;
         }
 
-        if ($this->circuitIsOpen()) {
+        $circuitRemainingMs = $this->circuitRemainingMs();
+
+        if ($circuitRemainingMs > 0) {
             $this->logger->debug('Provider request suppressed by open circuit', [
                 'provider' => $this->key(),
                 'url' => $this->safeUrl($url),
+                'circuit_remaining_ms' => $circuitRemainingMs,
             ]);
 
-            return null;
+            throw ProviderUnavailableException::circuitOpen($this->key(), $circuitRemainingMs);
         }
+
+        $this->waitOutRateLimitCooldown($url);
 
         $maxAttempts = max(1, (int) $this->setting('retry.max_attempts', 5));
         $baseDelay = max(1, (int) $this->setting('retry.base_delay_ms', 500));
@@ -164,7 +212,17 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
         $allHeaders = array_merge($this->defaultHeaders(), $headers);
 
         for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
-            $this->throttle();
+            $throttleWaitMs = $this->throttle();
+
+            if ($throttleWaitMs === null) {
+                $this->logger->debug('Provider request shed by client throttle', [
+                    'provider' => $this->key(),
+                    'url' => $this->safeUrl($url),
+                    'attempt' => $attempt,
+                ]);
+
+                throw ProviderUnavailableException::throttled($this->key(), $this->maxWaitMs());
+            }
 
             /*
              | Debug-only visibility into what actually goes out on the wire —
@@ -201,7 +259,7 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
                 if ($attempt >= $maxAttempts) {
                     $this->recordFailure();
 
-                    return null;
+                    throw ProviderUnavailableException::unreachable($this->key());
                 }
 
                 Sleep::for($this->backoffMs($attempt, $baseDelay, $maxDelay))->milliseconds();
@@ -211,29 +269,27 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
 
             if ($response->status() === 429) {
                 /*
-                 | The provider has told us exactly when it will serve us again.
-                 | Honour that instead of our own curve — backing off less than
-                 | asked risks a ban, backing off more wastes the window. The
-                 | cap still applies so a hostile `Retry-After: 86400` cannot
-                 | park a worker for a day.
+                 | Deliberately no in-loop retry. A 429 is the provider saying
+                 | "not now", and asking again a second later is asking the same
+                 | question — observed against the JioSaavn wrapper as five
+                 | attempts, five refusals and ~9s added to a *user-facing*
+                 | search (`SearchService::syncThenRerun()` runs the fetch
+                 | inline), all to return nothing.
+                 |
+                 | Instead the whole provider is parked in the shared cache, so
+                 | the cost of finding out it is limiting us is paid once by one
+                 | request rather than five times over by every request that
+                 | follows. `Retry-After` widens the park when the provider
+                 | bothers to send one; this wrapper sends none.
                  */
-                $wait = min($this->retryAfterMs($response) ?? $this->backoffMs($attempt, $baseDelay, $maxDelay), $maxDelay);
+                $cooldown = $this->beginRateLimitCooldown($this->retryAfterMs($response));
 
                 $this->logFailure('rate_limited', $url, [
                     'attempt' => $attempt,
-                    'retry_after_ms' => $wait,
+                    'cooldown_ms' => $cooldown,
                 ]);
 
-                if ($attempt >= $maxAttempts) {
-                    // Sustained 429s are exactly what the breaker is for.
-                    $this->recordFailure();
-
-                    return null;
-                }
-
-                Sleep::for($wait)->milliseconds();
-
-                continue;
+                throw ProviderUnavailableException::rateLimited($this->key(), $cooldown);
             }
 
             if ($response->serverError()) {
@@ -245,7 +301,7 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
                 if ($attempt >= $maxAttempts) {
                     $this->recordFailure();
 
-                    return null;
+                    throw ProviderUnavailableException::unreachable($this->key());
                 }
 
                 Sleep::for($this->backoffMs($attempt, $baseDelay, $maxDelay))->milliseconds();
@@ -264,7 +320,7 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
                 $this->logFailure('unauthorized', $url, ['status' => $response->status()]);
                 $this->recordFailure();
 
-                return null;
+                throw ProviderUnavailableException::unauthorized($this->key());
             }
 
             if ($response->clientError()) {
@@ -351,33 +407,190 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
     */
 
     /**
-     * Sleep out the remainder of this provider's minimum inter-request
-     * interval. MusicBrainz publishes a hard 1 req/sec and will block a client
-     * that ignores it, so the throttle is not optional there.
+     * How long a caller is willing to sit waiting — for its turn in the
+     * outbound schedule, or for a rate-limit cooldown to lapse — before the
+     * call is abandoned instead.
      *
-     * The last-call clock lives in the shared cache so parallel workers see
-     * each other, but read-then-write is not atomic: under heavy concurrency
-     * two workers can slip through together. For strict providers run the
-     * `sync` queue with a single worker.
+     * This is the load-shedding budget. Without it the two waits below would
+     * simply convert a busy provider into a slow app: a lazy sync runs inline
+     * on a search request, so every millisecond spent waiting here is a
+     * millisecond a user spends looking at a spinner for results the local
+     * catalog could already have answered.
      */
-    private function throttle(): void
+    private function maxWaitMs(): int
+    {
+        return max(0, (int) $this->setting('rate_limit.max_wait_ms', 2_000));
+    }
+
+    /**
+     * Space this request out from the last one sent to the same provider.
+     * MusicBrainz publishes a hard 1 req/sec and will block a client that
+     * ignores it, so the throttle is not optional there.
+     *
+     * @return int|null How long we waited, or null when the queue ahead is
+     *                  longer than `max_wait_ms` and the call should be shed
+     *                  rather than blocked behind it.
+     */
+    private function throttle(): ?int
     {
         $requests = max(1, (int) $this->setting('rate_limit.requests', 10));
         $perSeconds = max(1, (int) $this->setting('rate_limit.per_seconds', 1));
         $minIntervalMs = (int) ceil(($perSeconds * 1000) / $requests);
 
-        $key = $this->cacheKey('throttle');
-        $lastCallMs = (int) $this->cache->get($key, 0);
-        $nowMs = (int) (microtime(true) * 1000);
-        $elapsed = $nowMs - $lastCallMs;
+        $waitMs = $this->reserveSlot($minIntervalMs);
 
-        if ($lastCallMs > 0 && $elapsed < $minIntervalMs) {
-            Sleep::for($minIntervalMs - $elapsed)->milliseconds();
-            $nowMs += $minIntervalMs - $elapsed;
+        if ($waitMs === null) {
+            return null;
+        }
+
+        if ($waitMs > 0) {
+            Sleep::for($waitMs)->milliseconds();
+        }
+
+        return $waitMs;
+    }
+
+    /**
+     * Claim the next free moment in the provider's shared outbound schedule and
+     * return how far away it is, or null if that is further off than the wait
+     * budget allows.
+     *
+     * Taken under a cache lock wherever the store provides one (database, Redis
+     * and file all do). The previous read-then-write left the throttle merely
+     * advisory under concurrency — two workers reading the same clock both
+     * concluded it was their turn — which is precisely the burst a provider
+     * answers with a 429. Each caller now reserves a *distinct* slot.
+     *
+     * The sleep happens after the lock is released (see `throttle()`): the lock
+     * exists to hand out different slots, not to make callers queue behind one
+     * another holding it.
+     */
+    private function reserveSlot(int $minIntervalMs): ?int
+    {
+        $store = $this->cache->getStore();
+
+        if (! $store instanceof LockProvider) {
+            return $this->claimSlot($minIntervalMs);
+        }
+
+        $lock = $store->lock($this->cacheKey('throttle.lock'), 5);
+
+        try {
+            // Blocking longer for the lock than for the slot itself would
+            // defeat the shedding the budget exists to do.
+            $lock->block((int) max(1, ceil($this->maxWaitMs() / 1000)));
+        } catch (LockTimeoutException) {
+            // Contended past the budget: as good as a full queue.
+            return null;
+        }
+
+        try {
+            return $this->claimSlot($minIntervalMs);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function claimSlot(int $minIntervalMs): ?int
+    {
+        $nowMs = $this->nowMs();
+        $slotMs = max($nowMs, (int) $this->cache->get($this->cacheKey('throttle'), 0));
+
+        if ($slotMs - $nowMs > $this->maxWaitMs()) {
+            return null;
         }
 
         // A minute is far longer than any sane interval; the entry is only a clock.
-        $this->cache->put($key, $nowMs, 60);
+        $this->cache->put($this->cacheKey('throttle'), $slotMs + $minIntervalMs, 60);
+
+        return $slotMs - $nowMs;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Rate-limit cooldown
+    |--------------------------------------------------------------------------
+    |
+    | Where the circuit breaker below reacts to a provider that appears broken,
+    | this reacts to one that is working fine and has explicitly asked us to
+    | back off. It is shared state, so one request discovering the 429 spares
+    | every other request and worker from rediscovering it.
+    |
+    */
+
+    /** How much longer the provider is parked for; zero when it is not. */
+    protected function rateLimitCooldownRemainingMs(): int
+    {
+        return max(0, (int) $this->cache->get($this->cacheKey('cooldown'), 0) - $this->nowMs());
+    }
+
+    /**
+     * Sleep out a park short enough to be worth waiting for.
+     *
+     * @throws ProviderUnavailableException when it is not.
+     */
+    private function waitOutRateLimitCooldown(string $url): void
+    {
+        $remainingMs = $this->rateLimitCooldownRemainingMs();
+
+        if ($remainingMs === 0) {
+            return;
+        }
+
+        if ($remainingMs > $this->maxWaitMs()) {
+            $this->logger->debug('Provider request suppressed by rate-limit cooldown', [
+                'provider' => $this->key(),
+                'url' => $this->safeUrl($url),
+                'cooldown_remaining_ms' => $remainingMs,
+            ]);
+
+            throw ProviderUnavailableException::rateLimited($this->key(), $remainingMs);
+        }
+
+        Sleep::for($remainingMs)->milliseconds();
+    }
+
+    /**
+     * Park the provider after a 429 and return how long for.
+     *
+     * The cooldown doubles per consecutive 429 because the two situations
+     * behind one are indistinguishable from the response alone: a momentary
+     * burst limit, which a short park clears, and an exhausted quota, which
+     * nothing clears for hours. The public JioSaavn wrapper is a free
+     * Cloudflare Worker and hits the second kind — a fixed 30-second park would
+     * mean re-testing a wall every 30 seconds until midnight UTC. Escalating
+     * finds the right park length by itself, and one success resets it
+     * (`recordSuccess()`).
+     *
+     * @param  int|null  $retryAfterMs  The provider's own instruction, when it
+     *                                  sends one; it wins if it is longer.
+     */
+    private function beginRateLimitCooldown(?int $retryAfterMs): int
+    {
+        $base = max(1_000, (int) $this->setting('rate_limit.cooldown_ms', 30_000));
+        $ceiling = max($base, (int) $this->setting('rate_limit.cooldown_max_ms', 900_000));
+
+        // Capped exponent purely so 2 ** $strikes cannot overflow to a float
+        // during a very long outage; the min() below already bounds the result.
+        $strikes = ((int) $this->cache->get($this->cacheKey('strikes'), 0)) + 1;
+        $cooldown = (int) min($ceiling, max($base * (2 ** min(16, $strikes - 1)), $retryAfterMs ?? 0));
+
+        $this->cache->put($this->cacheKey('cooldown'), $this->nowMs() + $cooldown, (int) ceil($cooldown / 1000) + 1);
+
+        /*
+         | Strikes outlive their cooldown by one full ceiling, so the next 429
+         | after a park lapses escalates instead of restarting the curve — that
+         | is what makes a sustained outage settle at the ceiling rather than
+         | oscillating back down to 30 seconds every time.
+         */
+        $this->cache->put($this->cacheKey('strikes'), $strikes, (int) ceil(($cooldown + $ceiling) / 1000));
+
+        return $cooldown;
+    }
+
+    private function nowMs(): int
+    {
+        return (int) (microtime(true) * 1000);
     }
 
     /*
@@ -388,7 +601,20 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
 
     protected function circuitIsOpen(): bool
     {
-        return (bool) $this->cache->get($this->cacheKey('circuit'), false);
+        return $this->circuitRemainingMs() > 0;
+    }
+
+    /**
+     * How much of the breaker's cooldown is left.
+     *
+     * Stored as the deadline rather than a bare `true` so the remaining time is
+     * knowable: a caller told only "unavailable" has to guess when to come
+     * back, and `ProviderUnavailableException` can turn this into a real
+     * `Retry-After` instead.
+     */
+    protected function circuitRemainingMs(): int
+    {
+        return max(0, (int) $this->cache->get($this->cacheKey('circuit'), 0) - $this->nowMs());
     }
 
     /**
@@ -410,7 +636,7 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
             return;
         }
 
-        $this->cache->put($this->cacheKey('circuit'), true, $cooldown);
+        $this->cache->put($this->cacheKey('circuit'), $this->nowMs() + $cooldown * 1000, $cooldown);
         $this->cache->forget($this->cacheKey('failures'));
 
         $this->logger->error('Provider circuit opened', [
@@ -420,11 +646,21 @@ abstract class AbstractProviderAdapter implements ProviderAdapter
         ]);
     }
 
-    /** One good response clears the record — the breaker counts *consecutive* failures. */
+    /**
+     * One good response clears the record — the breaker counts *consecutive*
+     * failures, and the rate-limit curve escalates on *consecutive* 429s.
+     *
+     * `strikes` and `cooldown` are cleared here rather than left to expire so
+     * that a provider which recovers is treated as recovered: a search that got
+     * through must not still be paying off a 15-minute park that a burst
+     * earlier in the day escalated to.
+     */
     private function recordSuccess(): void
     {
-        if ($this->cache->get($this->cacheKey('failures')) !== null) {
-            $this->cache->forget($this->cacheKey('failures'));
+        foreach (['failures', 'strikes', 'cooldown'] as $suffix) {
+            if ($this->cache->get($this->cacheKey($suffix)) !== null) {
+                $this->cache->forget($this->cacheKey($suffix));
+            }
         }
     }
 

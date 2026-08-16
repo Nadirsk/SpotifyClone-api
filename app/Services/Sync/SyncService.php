@@ -7,6 +7,7 @@ namespace App\Services\Sync;
 use App\DTO\Providers\ProviderAlbumData;
 use App\DTO\Providers\ProviderArtistData;
 use App\DTO\Providers\ProviderSongData;
+use App\Jobs\NotifyFollowersOfRelease;
 use App\Models\Album;
 use App\Models\Artist;
 use App\Models\Provider;
@@ -218,6 +219,18 @@ final class SyncService
 
             $album = $this->deduplicator->findAlbum($data, $provider, $artist);
             $album = $this->writeEntity(Album::class, $album, $this->normalizer->albumAttributes($data, $artist));
+
+            /*
+             | Announce it to the artist's followers, but only the first time
+             | this album is ever written — `wasRecentlyCreated` is the only
+             | signal that separates a genuine new release from the same album
+             | arriving again through a second provider or a refresh. Dispatched
+             | after the transaction commits so a rolled-back sync cannot
+             | announce a release that does not exist.
+             */
+            if ($album->wasRecentlyCreated) {
+                NotifyFollowersOfRelease::dispatch($artist, $album)->afterCommit();
+            }
 
             $this->writeMapping(
                 ProviderAlbumMapping::class,

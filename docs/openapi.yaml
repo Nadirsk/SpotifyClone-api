@@ -717,7 +717,7 @@ paths:
   /playlists/{playlist}/songs:
     post:
       tags: [Playlists]
-      summary: Add a song to a playlist (owner only)
+      summary: Add a song to a playlist (owner, or a collaborator while is_collaborative is true)
       parameters:
         - $ref: "#/components/parameters/PlaylistIdPath"
       requestBody:
@@ -753,7 +753,7 @@ paths:
   /playlists/{playlist}/songs/{song}:
     delete:
       tags: [Playlists]
-      summary: Remove a song from a playlist (owner only)
+      summary: Remove a song from a playlist (owner, or a collaborator while is_collaborative is true)
       parameters:
         - $ref: "#/components/parameters/PlaylistIdPath"
         - name: song
@@ -766,6 +766,197 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404":
           description: Playlist not found, or the song is not in it
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  # ---------------------------------------------------------------------
+  # Playlist collaboration — Spotify-style "Invite collaborators": one
+  # shareable, revocable link per playlist rather than a per-person invite.
+  # ---------------------------------------------------------------------
+  /playlists/{playlist}/collaborators:
+    get:
+      tags: [Playlists]
+      summary: List a playlist's collaborators
+      description: Same visibility rule as GET /playlists/{playlist} — public/unlisted are open, private is owner + collaborators only.
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      responses:
+        "200":
+          description: Collaborators
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/PlaylistCollaborator" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /playlists/{playlist}/collaborators/{user}:
+    delete:
+      tags: [Playlists]
+      summary: Remove a collaborator (owner only)
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+        - name: user
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Playlist not found, or that user is not a collaborator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /playlists/{playlist}/leave:
+    post:
+      tags: [Playlists]
+      summary: Leave a playlist you collaborate on
+      description: The owner cannot leave their own playlist — delete it instead.
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      responses:
+        "204": { description: Left }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /playlists/{playlist}/invitations:
+    post:
+      tags: [Playlists]
+      summary: Create or regenerate the invite link (owner only)
+      description: Only one link exists per playlist — this replaces any previous one, which stops working immediately.
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      responses:
+        "201":
+          description: Invite link created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          token: { type: string, description: Build the share URL client-side, e.g. `/playlist/{id}/collaborate/{token}`. }
+                          expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      tags: [Playlists]
+      summary: Get the current active invite link, if any (owner only)
+      description: >
+        Re-displays the same token every time — reopening "Invite
+        collaborators" shows the link you already have, matching real
+        Spotify, rather than forcing a new one on every view.
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      responses:
+        "200":
+          description: Invite link. `data` is null if there is no active link.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        nullable: true
+                        properties:
+                          token: { type: string }
+                          expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Playlists]
+      summary: Revoke the invite link (owner only)
+      parameters:
+        - $ref: "#/components/parameters/PlaylistIdPath"
+      responses:
+        "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /playlists/invitations/{token}:
+    get:
+      tags: [Playlists]
+      summary: Preview an invite link
+      description: >
+        The pre-login "you've been invited" preview a shared link opens to —
+        no auth required. Deliberately thin: no tracklist, so a private
+        playlist's contents never leak to someone who has not joined yet.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Invitation preview
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PlaylistInvitationPreview" }
+        "404":
+          description: Invalid, expired, or revoked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /playlists/invitations/{token}/accept:
+    post:
+      tags: [Playlists]
+      summary: Accept an invite link and join as a collaborator
+      description: Idempotent — accepting a link you have already used just returns the playlist again rather than erroring.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Joined
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404":
+          description: Invalid, expired, or revoked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          description: The caller already owns this playlist
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
@@ -1277,6 +1468,10 @@ components:
         description: { type: string, nullable: true }
         cover_image: { type: string, format: uri, nullable: true }
         visibility: { $ref: "#/components/schemas/PlaylistVisibility" }
+        is_collaborative: { type: boolean, description: Whether collaborators may add/remove songs. }
+        is_collaborator:
+          type: boolean
+          description: Whether the caller is an active collaborator. Always false for the owner and for a guest.
         tracks_count: { type: integer }
         total_duration: { type: integer, description: Seconds. }
         created_at: { type: string, format: date-time }
@@ -1290,6 +1485,31 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Song" }
           description: Present only on GET /playlists/{id}.
+
+    PlaylistCollaborator:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: The collaborator's user id. }
+        name: { type: string }
+        avatar: { type: string, nullable: true }
+        joined_at: { type: string, format: date-time }
+
+    PlaylistInvitationPreview:
+      type: object
+      description: The pre-login preview a shared invite link opens to.
+      properties:
+        playlist:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            title: { type: string }
+            cover_image: { type: string, format: uri, nullable: true }
+            tracks_count: { type: integer }
+        invited_by:
+          type: object
+          properties:
+            name: { type: string }
+        expires_at: { type: string, format: date-time, nullable: true }
 
     HistoryEntry:
       type: object

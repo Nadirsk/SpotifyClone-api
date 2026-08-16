@@ -25,6 +25,7 @@ final class StorePlaylistRequest extends FormRequest
             'description' => ['nullable', 'string', 'max:1000'],
             'visibility' => ['required', 'string', Rule::in(PlaylistVisibility::values())],
             'cover_image' => ['nullable', 'url'],
+            'is_collaborative' => ['sometimes', 'boolean'],
         ];
     }
 }

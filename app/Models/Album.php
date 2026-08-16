@@ -22,6 +22,8 @@ class Album extends Model
         'artist_id',
         'language_id',
         'title',
+        // See Song::$fillable — parsed, never provider-supplied.
+        'film_title',
         'slug',
         'cover_image',
         'release_date',

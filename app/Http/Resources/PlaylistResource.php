@@ -22,6 +22,14 @@ final class PlaylistResource extends JsonResource
             'description' => $this->description,
             'cover_image' => $this->cover_image,
             'visibility' => $this->visibility->value,
+            'is_collaborative' => (bool) $this->is_collaborative,
+            /*
+             | Whether the caller may add/remove songs as a collaborator —
+             | never true for the owner (they don't need it) or for a guest.
+             * Uses Playlist::isCollaborator(), which is safe whether or not
+             | `collaborators` was eager-loaded.
+             */
+            'is_collaborator' => $this->isCollaborator($request->user()),
             'tracks_count' => $this->tracks_count,
             'total_duration' => $this->total_duration,
             'created_at' => $this->created_at?->toIso8601String(),

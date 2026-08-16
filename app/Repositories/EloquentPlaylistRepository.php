@@ -6,11 +6,14 @@ namespace App\Repositories;
 
 use App\Contracts\Repositories\PlaylistRepository;
 use App\Models\Playlist;
+use App\Models\PlaylistCollaborator;
+use App\Models\PlaylistInvitation;
 use App\Models\PlaylistTrack;
 use App\Models\Song;
 use App\Models\User;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 
 final class EloquentPlaylistRepository implements PlaylistRepository
@@ -137,10 +140,67 @@ final class EloquentPlaylistRepository implements PlaylistRepository
         ])->save();
     }
 
+    /** @return Collection<int, PlaylistCollaborator> */
+    public function collaborators(Playlist $playlist): Collection
+    {
+        return $playlist->collaborators()->with('user')->orderBy('created_at')->get();
+    }
+
+    public function addCollaborator(Playlist $playlist, User $user): bool
+    {
+        if ($playlist->user_id === $user->getKey() || $playlist->isCollaborator($user)) {
+            return false;
+        }
+
+        $playlist->collaborators()->create(['user_id' => $user->getKey()]);
+
+        return true;
+    }
+
+    public function removeCollaborator(Playlist $playlist, User $user): bool
+    {
+        return $playlist->collaborators()->where('user_id', $user->getKey())->delete() > 0;
+    }
+
+    public function findInvitation(Playlist $playlist): ?PlaylistInvitation
+    {
+        return $playlist->invitation()->first();
+    }
+
+    public function putInvitation(Playlist $playlist, User $invitedBy, string $token, ?\DateTimeInterface $expiresAt): PlaylistInvitation
+    {
+        /** @var PlaylistInvitation */
+        return PlaylistInvitation::query()->updateOrCreate(
+            ['playlist_id' => $playlist->getKey()],
+            [
+                'invited_by' => $invitedBy->getKey(),
+                'token' => $token,
+                'expires_at' => $expiresAt,
+                'revoked_at' => null,
+            ],
+        );
+    }
+
+    public function findActiveInvitationByToken(string $token): ?PlaylistInvitation
+    {
+        $invitation = PlaylistInvitation::query()
+            ->where('token', $token)
+            ->whereHas('playlist')
+            ->with(['playlist', 'inviter'])
+            ->first();
+
+        return $invitation !== null && $invitation->isActive() ? $invitation : null;
+    }
+
+    public function revokeInvitation(Playlist $playlist): bool
+    {
+        return $playlist->invitation()->update(['revoked_at' => now()]) > 0;
+    }
+
     /** @return Builder<Playlist> */
     private function baseQuery(): Builder
     {
-        return Playlist::query()->with('owner');
+        return Playlist::query()->with(['owner', 'collaborators:id,playlist_id,user_id']);
     }
 
     /** @return Builder<PlaylistTrack> */

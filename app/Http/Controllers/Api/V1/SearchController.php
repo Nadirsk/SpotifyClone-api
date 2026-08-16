@@ -9,7 +9,9 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Search\SearchRequest;
 use App\Http\Resources\AlbumResource;
 use App\Http\Resources\ArtistResource;
+use App\Http\Resources\GenreResource;
 use App\Http\Resources\PlaylistResource;
+use App\Http\Resources\PublicUserResource;
 use App\Http\Resources\SongResource;
 use App\Services\Search\SearchService;
 use App\Traits\ApiResponse;
@@ -34,6 +36,10 @@ final class SearchController extends Controller
         'artist' => ArtistResource::class,
         'album' => AlbumResource::class,
         'playlist' => PlaylistResource::class,
+        // PublicUserResource, never UserResource — search must not hand out
+        // email addresses. See that resource's docblock.
+        'user' => PublicUserResource::class,
+        'genre' => GenreResource::class,
     ];
 
     public function __construct(
@@ -55,6 +61,7 @@ final class SearchController extends Controller
             return $this->respondPaginated(
                 $this->search->searchType($query, $user),
                 self::RESOURCES[$query->type],
+                meta: $this->degradationMeta(),
             );
         }
 
@@ -65,7 +72,32 @@ final class SearchController extends Controller
             'artists' => ArtistResource::collection($results->artists)->resolve(),
             'albums' => AlbumResource::collection($results->albums)->resolve(),
             'playlists' => PlaylistResource::collection($results->playlists)->resolve(),
-        ]);
+            'users' => PublicUserResource::collection($results->users)->resolve(),
+            'genres' => GenreResource::collection($results->genres)->resolve(),
+        ], meta: $this->degradationMeta());
+    }
+
+    /**
+     * A 200 with fewer results than the provider could have supplied is still a
+     * success, so this is metadata rather than an error: the results are real
+     * and usable, they are simply limited to what has already been synced.
+     *
+     * Present only while degraded, so a client can key off its mere existence
+     * ("showing saved results") and never has to interpret a `false`.
+     *
+     * @return array<string, mixed>
+     */
+    private function degradationMeta(): array
+    {
+        if ($this->search->liveSyncAvailable()) {
+            return [];
+        }
+
+        return [
+            'degraded' => true,
+            'reason' => 'catalog_sync_unavailable',
+            'detail' => 'Showing results already in the catalog. Live catalog updates are paused and will resume automatically.',
+        ];
     }
 
     /**

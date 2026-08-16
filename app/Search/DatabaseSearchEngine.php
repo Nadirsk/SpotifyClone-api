@@ -11,8 +11,10 @@ use App\Enums\PlaylistVisibility;
 use App\Enums\SortOrder;
 use App\Models\Album;
 use App\Models\Artist;
+use App\Models\Genre;
 use App\Models\Playlist;
 use App\Models\Song;
+use App\Models\User;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
@@ -24,8 +26,15 @@ use InvalidArgumentException;
  * Search backed by MySQL FULLTEXT indexes.
  *
  * This is what runs locally and it is deliberately not a full substitute for
- * Elasticsearch — no real typo tolerance, no synonyms, no per-language
- * analyzers. See docs/DEFERRED.md §2 for what changes when Elasticsearch lands.
+ * Elasticsearch — no synonyms, no per-language analyzers, no relevance
+ * tuning beyond "exact match, then popularity". See docs/DEFERRED.md §2 for
+ * what changes when Elasticsearch lands.
+ *
+ * It does tolerate a misspelling, but only as a fallback: `fuzzyMatch()`
+ * only runs once the indexed FULLTEXT/LIKE pass has already come back with
+ * nothing, scoring a popularity-bounded candidate set by edit-distance
+ * similarity in PHP. See that method's docblock for why FULLTEXT's own
+ * prefix wildcard isn't enough on its own.
  */
 final class DatabaseSearchEngine implements SearchEngine
 {
@@ -40,7 +49,48 @@ final class DatabaseSearchEngine implements SearchEngine
         'artist' => ['model' => Artist::class, 'column' => 'name', 'with' => []],
         'album' => ['model' => Album::class, 'column' => 'title', 'with' => ['artist', 'language']],
         'playlist' => ['model' => Playlist::class, 'column' => 'title', 'with' => ['owner']],
+        'user' => ['model' => User::class, 'column' => 'name', 'with' => []],
+        'genre' => ['model' => Genre::class, 'column' => 'name', 'with' => []],
     ];
+
+    /**
+     * Types with no popularity signal of their own, and what to rank them by
+     * instead.
+     *
+     * Ordering has to name a real column — `fuzzyMatch()` bounds its candidate
+     * scan with it and `applySort()` breaks relevance ties with it — so a type
+     * without one needs a deliberate substitute rather than a null that every
+     * call site then has to handle. A profile ranks by how many followers it
+     * has; a genre by how much of the catalog sits under it. Both are the
+     * closest honest analogue of "popular" those tables have.
+     *
+     * @var array<string, string>
+     */
+    private const POPULARITY_SUBSTITUTES = [
+        'playlist' => 'tracks_count',
+        'user' => 'followers_count',
+        'genre' => 'songs_count',
+    ];
+
+    /**
+     * Counts that have to be selected before `POPULARITY_SUBSTITUTES` can order
+     * by them — they are aggregates, not columns.
+     *
+     * @var array<string, string>
+     */
+    private const POPULARITY_COUNTS = [
+        'user' => 'followers',
+        'genre' => 'songs',
+    ];
+
+    /**
+     * Minimum edit-distance similarity (see `similarity()`) for a fuzzy
+     * candidate to surface at all. Tuned against real typos this catalog
+     * needs to survive: "Arjit Singh" → "Arijit Singh" (0.92), "Arijeet
+     * Singh" → "Arijit Singh" (0.85), "Gali Gaali" → "Gali Gali" (0.90) all
+     * clear it comfortably; unrelated terms score well below it.
+     */
+    private const FUZZY_THRESHOLD = 0.6;
 
     public function searchAll(SearchQuery $query): SearchResults
     {
@@ -54,7 +104,11 @@ final class DatabaseSearchEngine implements SearchEngine
         $results = [];
 
         foreach (array_keys(self::TYPES) as $type) {
-            $results[$type] = $this->buildQuery($type, $query)->limit($perType)->get();
+            $strict = $this->buildQuery($type, $query)->limit($perType)->get();
+
+            $results[$type] = $this->needsFuzzyFallback($strict->count(), $query->term)
+                ? $this->fuzzyMatch($type, $query, $perType)
+                : $strict;
         }
 
         return new SearchResults(
@@ -62,6 +116,8 @@ final class DatabaseSearchEngine implements SearchEngine
             artists: $results['artist'],
             albums: $results['album'],
             playlists: $results['playlist'],
+            users: $results['user'],
+            genres: $results['genre'],
         );
     }
 
@@ -75,8 +131,24 @@ final class DatabaseSearchEngine implements SearchEngine
             return new Paginator([], 0, $query->limit, $query->page);
         }
 
-        return $this->buildQuery($query->type, $query)
+        $paginator = $this->buildQuery($query->type, $query)
             ->paginate(perPage: $query->limit, page: $query->page);
+
+        if (! $this->needsFuzzyFallback($paginator->total(), $query->term)) {
+            return $paginator;
+        }
+
+        // A typo'd query rarely needs more than a couple of pages of
+        // near-matches — this caps the candidate pool without a second,
+        // unbounded fuzzy pass for every page the user scrolls to.
+        $fuzzy = $this->fuzzyMatch($query->type, $query, max($query->limit * 3, 30));
+
+        return new Paginator(
+            $fuzzy->forPage($query->page, $query->limit)->values(),
+            $fuzzy->count(),
+            $query->limit,
+            $query->page,
+        );
     }
 
     public function suggest(string $term, int $limit): Collection
@@ -122,10 +194,31 @@ final class DatabaseSearchEngine implements SearchEngine
         $table = (new $model)->getTable();
 
         $this->matchText($builder, $table, $config['column'], $query->term);
+        $this->withPopularityCount($builder, $type);
         $this->applyFilters($builder, $type, $query);
         $this->applySort($builder, $type, $query);
 
         return $builder;
+    }
+
+    /**
+     * Select the aggregate a type ranks by, when its "popularity" is a count
+     * rather than a column.
+     *
+     * Has to happen before `applySort()`: ordering by `followers_count` is only
+     * legal once `withCount()` has put it in the select list. The resource
+     * layer reads the same aggregate through `whenCounted()`, so this doubles
+     * as the eager-load that keeps the serialiser off an N+1.
+     *
+     * @param  Builder<Model>  $builder
+     */
+    private function withPopularityCount(Builder $builder, string $type): void
+    {
+        $relation = self::POPULARITY_COUNTS[$type] ?? null;
+
+        if ($relation !== null) {
+            $builder->withCount($relation);
+        }
     }
 
     /**
@@ -218,6 +311,138 @@ final class DatabaseSearchEngine implements SearchEngine
     }
 
     /**
+     * A fuzzy retry is only worth its extra query once the indexed path has
+     * already come back with nothing — once FULLTEXT has found something,
+     * layering typo-tolerance on top of an already-working result set is a
+     * refinement for later, not what breaks a user's search today.
+     */
+    private function needsFuzzyFallback(int $strictCount, string $term): bool
+    {
+        return $strictCount === 0 && mb_strlen(trim($term)) >= 2;
+    }
+
+    /**
+     * The retry when FULLTEXT/LIKE found nothing at all.
+     *
+     * `toBooleanTerm()`'s `+word*` only forgives a *missing trailing*
+     * character, and only by accident: "Blu Halo" happens to match "Blue
+     * Halo" because "Blu" is a valid prefix of "Blue", but "Arjit Singh"
+     * (a dropped middle letter) and "Gali Gaali" (an extra one) return
+     * nothing, because neither is a prefix of the correct spelling. A
+     * transposed, wrong, extra, or missing letter *anywhere* in the word is
+     * exactly the class of typo Spotify's own search visibly tolerates and
+     * FULLTEXT structurally cannot.
+     *
+     * This scores every candidate by edit-distance similarity in PHP
+     * instead. The catalog is small enough (low thousands of rows per type)
+     * that a popularity-bounded scan and score is milliseconds of work, and
+     * it only ever runs after the indexed path has already come back empty
+     * — a real typo is the rare case, not the common one.
+     *
+     * @return Collection<int, Model>
+     */
+    private function fuzzyMatch(string $type, SearchQuery $query, int $limit): Collection
+    {
+        $config = self::TYPES[$type];
+        $model = $config['model'];
+        $column = $config['column'];
+        $popularityColumn = $this->popularityColumn($type);
+
+        $needle = $this->normalizeForFuzzy($query->term);
+
+        if ($needle === '') {
+            return new Collection;
+        }
+
+        /** @var Builder<Model> $builder */
+        $builder = $model::query()->with($config['with']);
+        $this->withPopularityCount($builder, $type);
+        $this->applyFilters($builder, $type, $query);
+
+        // Bounded by popularity, not a full table scan: an obscure,
+        // rarely-searched row losing out to a popular near-miss is the
+        // right trade against scoring every row in PHP on every miss.
+        $candidates = $builder->orderByDesc($popularityColumn)->limit(1000)->get();
+
+        $candidates->each(function (Model $candidate) use ($column, $needle) {
+            $label = $this->normalizeForFuzzy((string) $candidate->getAttribute($column));
+            $candidate->setAttribute('relevance', $this->similarity($needle, $label));
+        });
+
+        return $candidates
+            ->filter(fn (Model $candidate) => $candidate->getAttribute('relevance') >= self::FUZZY_THRESHOLD)
+            ->sortBy([['relevance', 'desc'], [$popularityColumn, 'desc']])
+            ->take($limit)
+            ->values();
+    }
+
+    /** Matches `applySort()`'s own popularity column choice per type. */
+    private function popularityColumn(string $type): string
+    {
+        return self::POPULARITY_SUBSTITUTES[$type] ?? 'popularity';
+    }
+
+    /**
+     * Lowercased, punctuation-collapsed-to-spaces, whitespace-normalised —
+     * so "Dhurandhar," and "dhurandhar" (or a title carrying a stray
+     * double space) compare as equal rather than merely similar.
+     */
+    private function normalizeForFuzzy(string $value): string
+    {
+        $value = mb_strtolower(trim($value));
+        $value = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $value) ?? $value;
+
+        return trim(preg_replace('/\s+/', ' ', $value) ?? $value);
+    }
+
+    /**
+     * 0..1 similarity — 1 is identical, 0 shares nothing. Threshold-checked
+     * against `FUZZY_THRESHOLD` by the caller.
+     */
+    private function similarity(string $needle, string $haystack): float
+    {
+        if ($needle === '' || $haystack === '') {
+            return 0.0;
+        }
+
+        $longest = max(mb_strlen($needle), mb_strlen($haystack));
+
+        return 1 - ($this->levenshteinMb($needle, $haystack) / $longest);
+    }
+
+    /**
+     * PHP's built-in `levenshtein()` operates byte-by-byte, which overcounts
+     * edits on any multi-byte character — every non-Latin script this
+     * catalog's languages actually use (06_SEARCH_ARCHITECTURE §7). This is
+     * the same algorithm over `mb_str_split()` instead, so a single
+     * Devanagari character costs one edit, not three or four.
+     */
+    private function levenshteinMb(string $a, string $b): int
+    {
+        $a = mb_str_split($a);
+        $b = mb_str_split($b);
+
+        $lengthB = count($b);
+        $previousRow = range(0, $lengthB);
+
+        foreach ($a as $i => $charA) {
+            $currentRow = [$i + 1];
+
+            foreach ($b as $j => $charB) {
+                $currentRow[$j + 1] = min(
+                    $currentRow[$j] + 1,
+                    $previousRow[$j + 1] + 1,
+                    $previousRow[$j] + ($charA === $charB ? 0 : 1),
+                );
+            }
+
+            $previousRow = $currentRow;
+        }
+
+        return $previousRow[$lengthB];
+    }
+
+    /**
      * @param  Builder<Model>  $builder
      */
     private function applyFilters(Builder $builder, string $type, SearchQuery $query): Builder
@@ -229,6 +454,17 @@ final class DatabaseSearchEngine implements SearchEngine
              | private ones belong to the owner's library, not to search.
              */
             return $builder->where('visibility', PlaylistVisibility::Public);
+        }
+
+        /*
+         | Profiles and genres share none of the catalog's filter vocabulary —
+         | a genre has no release year and a user has no artist to filter
+         | through. Returning early is not just an optimisation: `country`
+         | below falls through to `whereHas('artist')` for any unrecognised
+         | type, which would throw on both of these.
+         */
+        if (in_array($type, ['user', 'genre'], true)) {
+            return $builder;
         }
 
         $genre = $query->filter('genre');
@@ -288,18 +524,16 @@ final class DatabaseSearchEngine implements SearchEngine
             SortOrder::Oldest => $hasReleaseDate
                 ? $builder->orderBy('release_date')
                 : $builder->orderBy('created_at'),
-            SortOrder::Popularity => $type === 'playlist'
-                ? $builder->orderByDesc('tracks_count')
-                : $builder->orderByDesc('popularity'),
+            SortOrder::Popularity => $builder->orderByDesc($this->popularityColumn($type)),
             SortOrder::Alphabetical => $builder->orderBy($titleColumn),
             /*
              | Relevance alone clusters ties arbitrarily, so popularity breaks
              | them — this is the "exact match, then popularity" ranking from
              | 06_SEARCH_ARCHITECTURE §8.
              */
-            SortOrder::Relevance => $type === 'playlist'
-                ? $builder->orderByDesc('relevance')->orderByDesc('tracks_count')
-                : $builder->orderByDesc('relevance')->orderByDesc('popularity'),
+            SortOrder::Relevance => $builder
+                ->orderByDesc('relevance')
+                ->orderByDesc($this->popularityColumn($type)),
         };
     }
 }

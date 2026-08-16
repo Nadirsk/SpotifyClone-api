@@ -63,6 +63,16 @@ final class PlaylistPolicyTest extends TestCase
         $this->assertFalse($this->policy->view($stranger, $playlist));
     }
 
+    public function test_view_allows_an_active_collaborator_to_see_a_private_playlist(): void
+    {
+        $owner = $this->makeUser('owner-private-collab');
+        $collaborator = $this->makeUser('collaborator-private');
+        $playlist = $this->makePlaylist($owner->id, PlaylistVisibility::Private);
+
+        $this->assertTrue($this->policy->view($collaborator, $playlist, isCollaborator: true));
+        $this->assertFalse($this->policy->view($collaborator, $playlist, isCollaborator: false));
+    }
+
     // ---------------------------------------------------------------------
     // update()
     // ---------------------------------------------------------------------
@@ -114,6 +124,19 @@ final class PlaylistPolicyTest extends TestCase
         }
     }
 
+    public function test_add_song_allows_a_collaborator_only_while_the_playlist_is_collaborative(): void
+    {
+        $owner = $this->makeUser('owner-add-song-collab');
+        $collaborator = $this->makeUser('collaborator-add-song');
+
+        $collaborative = $this->makePlaylist($owner->id, PlaylistVisibility::Public, isCollaborative: true);
+        $this->assertTrue($this->policy->addSong($collaborator, $collaborative, isCollaborator: true));
+        $this->assertFalse($this->policy->addSong($collaborator, $collaborative, isCollaborator: false));
+
+        $notCollaborative = $this->makePlaylist($owner->id, PlaylistVisibility::Public, isCollaborative: false);
+        $this->assertFalse($this->policy->addSong($collaborator, $notCollaborative, isCollaborator: true));
+    }
+
     // ---------------------------------------------------------------------
     // removeSong()
     // ---------------------------------------------------------------------
@@ -131,6 +154,52 @@ final class PlaylistPolicyTest extends TestCase
         }
     }
 
+    public function test_remove_song_allows_a_collaborator_only_while_the_playlist_is_collaborative(): void
+    {
+        $owner = $this->makeUser('owner-remove-song-collab');
+        $collaborator = $this->makeUser('collaborator-remove-song');
+
+        $collaborative = $this->makePlaylist($owner->id, PlaylistVisibility::Public, isCollaborative: true);
+        $this->assertTrue($this->policy->removeSong($collaborator, $collaborative, isCollaborator: true));
+        $this->assertFalse($this->policy->removeSong($collaborator, $collaborative, isCollaborator: false));
+
+        $notCollaborative = $this->makePlaylist($owner->id, PlaylistVisibility::Public, isCollaborative: false);
+        $this->assertFalse($this->policy->removeSong($collaborator, $notCollaborative, isCollaborator: true));
+    }
+
+    // ---------------------------------------------------------------------
+    // inviteCollaborators() / removeCollaborator()
+    // ---------------------------------------------------------------------
+
+    public function test_invite_collaborators_and_remove_collaborator_allow_only_the_owner(): void
+    {
+        $owner = $this->makeUser('owner-invite');
+        $stranger = $this->makeUser('stranger-invite');
+        $playlist = $this->makePlaylist($owner->id, PlaylistVisibility::Private);
+
+        $this->assertTrue($this->policy->inviteCollaborators($owner, $playlist));
+        $this->assertFalse($this->policy->inviteCollaborators($stranger, $playlist));
+
+        $this->assertTrue($this->policy->removeCollaborator($owner, $playlist));
+        $this->assertFalse($this->policy->removeCollaborator($stranger, $playlist));
+    }
+
+    // ---------------------------------------------------------------------
+    // leave()
+    // ---------------------------------------------------------------------
+
+    public function test_leave_allows_an_active_collaborator_but_never_the_owner(): void
+    {
+        $owner = $this->makeUser('owner-leave');
+        $collaborator = $this->makeUser('collaborator-leave');
+        $playlist = $this->makePlaylist($owner->id, PlaylistVisibility::Private);
+
+        $this->assertTrue($this->policy->leave($collaborator, $playlist, isCollaborator: true));
+        $this->assertFalse($this->policy->leave($collaborator, $playlist, isCollaborator: false));
+        // The owner is never a collaborator, so this is false regardless of the flag.
+        $this->assertFalse($this->policy->leave($owner, $playlist, isCollaborator: true));
+    }
+
     private function makeUser(string $id): User
     {
         $user = new User;
@@ -139,11 +208,12 @@ final class PlaylistPolicyTest extends TestCase
         return $user;
     }
 
-    private function makePlaylist(string $ownerId, PlaylistVisibility $visibility): Playlist
+    private function makePlaylist(string $ownerId, PlaylistVisibility $visibility, bool $isCollaborative = false): Playlist
     {
         $playlist = new Playlist;
         $playlist->user_id = $ownerId;
         $playlist->visibility = $visibility;
+        $playlist->is_collaborative = $isCollaborative;
 
         return $playlist;
     }

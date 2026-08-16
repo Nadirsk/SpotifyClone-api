@@ -91,5 +91,7 @@ return [
     'playlists' => [
         'max_per_user' => 500,
         'max_tracks' => 1000,
+        // How long a generated "Invite collaborators" link stays usable.
+        'invite_expiry_days' => 30,
     ],
 ];

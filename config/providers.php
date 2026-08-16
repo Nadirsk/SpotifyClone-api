@@ -45,8 +45,9 @@ return [
          | base_delay_ms * 2^(N-1), jittered, and clamped to max_delay_ms so a
          | provider answering 503 for an hour cannot pin a queue worker.
          |
-         | A 429 ignores this curve entirely and honours `Retry-After` instead —
-         | the provider knows better than we do when it will serve us again.
+         | A 429 does not use this curve and is never retried in-loop at all —
+         | it goes to the cooldown below instead. Retrying a refusal is just
+         | collecting the same refusal again, one attempt slower each time.
          */
         'retry' => [
             'max_attempts' => 5,
@@ -71,14 +72,36 @@ return [
 
         /*
          | Client-side spacing between requests to one provider, expressed as
-         | `requests` per `per_seconds`. The adapter sleeps the remainder of the
-         | resulting minimum interval before each call. This is a courtesy
-         | throttle, not a guarantee: it is per-process, so run the `sync` queue
-         | with a single worker for providers whose published limit is strict.
+         | `requests` per `per_seconds`. Each caller reserves the next free slot
+         | in a shared, lock-guarded schedule and sleeps until it comes round,
+         | so the spacing holds across parallel queue workers and PHP-FPM
+         | processes rather than only within one of them.
          */
         'rate_limit' => [
             'requests' => 10,
             'per_seconds' => 1,
+
+            /*
+             | Load shedding. The longest a caller will wait — for its slot, or
+             | for a cooldown to lapse — before abandoning the call and letting
+             | the local catalog answer alone.
+             |
+             | Small on purpose: a lazy sync runs inline on a user's search
+             | (SearchService::syncThenRerun()), so this is latency a real
+             | person sits through. A backed-up provider should make the app
+             | slightly less complete, never slow.
+             */
+            'max_wait_ms' => 2_000,
+
+            /*
+             | How long one 429 parks the entire provider, doubling per
+             | consecutive 429 up to `cooldown_max_ms` and reset by the first
+             | success. Shared across processes, so the cost of discovering a
+             | rate limit is paid once rather than by every request that
+             | follows. A longer `Retry-After` from the provider wins.
+             */
+            'cooldown_ms' => 30_000,
+            'cooldown_max_ms' => 900_000,
         ],
     ],
 
@@ -130,6 +153,22 @@ return [
          | just a bigger page of the same response.
          */
         'lazy_search_limit' => 50,
+
+        /*
+         | How many of those results get a follow-up detail call during a lazy
+         | sync — `getArtist()` for a bio and follower count, `albumTracks()`
+         | for a tracklist.
+         |
+         | Unlike the search above, this one *is* a rate-limit concern, and was
+         | the single biggest source of outbound traffic in the app: one detail
+         | call per hit against a 50-result search meant a first-time term cost
+         | upwards of a hundred JioSaavn requests, which is how a shared free
+         | tier gets exhausted by one developer typing in a search box. Capped
+         | at the handful a user is actually likely to click; `catalog:enrich-
+         | artists` and the incremental sync backfill the rest off-peak, which
+         | is what they are for.
+         */
+        'detail_fetch_limit' => 5,
 
         /*
          | Minutes a search term is remembered before another live sync is
@@ -243,6 +282,15 @@ return [
     | community-maintained wrapper by default; swap it for a self-hosted
     | instance for anything beyond light development use.
     |
+    | That last sentence is operational, not aspirational. The public instance
+    | is a free-tier Cloudflare Worker whose *daily* request allowance is shared
+    | with everyone else pointing at it, and once that allowance is gone every
+    | endpoint answers `429` with a plain-text `error code: 1027` body and no
+    | `Retry-After`, until it resets at 00:00 UTC. Observed here on 2026-08-15:
+    | fine until 09:52 UTC, a wall from then on. No amount of client-side
+    | politeness earns quota back — the cooldown below only keeps the app fast
+    | while it is gone. Self-host the wrapper to actually fix it.
+    |
     */
 
     'jiosaavn' => [
@@ -250,8 +298,26 @@ return [
         // saavn.dev, the wrapper's own documented default, does not resolve
         // (confirmed dead 2026-08-07); saavn.sumit.co is the author's live one.
         'base_url' => env('JIOSAAVN_BASE_URL', 'https://saavn.sumit.co/api'),
-        // Undocumented and unofficial; conservative guess to stay polite.
-        'rate_limit' => ['requests' => 5, 'per_seconds' => 1],
+        'rate_limit' => [
+            /*
+             | Undocumented and unofficial. Deliberately below the shared
+             | default: we are a guest on someone else's free tier, and the
+             | binding limit here is a daily budget rather than a per-second
+             | one, so bursting buys nothing and only risks Cloudflare's own
+             | burst protection on top.
+             */
+            'requests' => (int) env('JIOSAAVN_RATE_LIMIT_REQUESTS', 2),
+            'per_seconds' => (int) env('JIOSAAVN_RATE_LIMIT_PER_SECONDS', 1),
+
+            /*
+             | Starts higher and climbs further than the shared default because
+             | of that daily budget: when this provider says no, it usually
+             | means no for hours, and the escalation should reach a park worth
+             | having quickly instead of probing a wall all afternoon.
+             */
+            'cooldown_ms' => 60_000,
+            'cooldown_max_ms' => 1_800_000,
+        ],
     ],
 
     /*

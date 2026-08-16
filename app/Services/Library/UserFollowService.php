@@ -7,6 +7,7 @@ namespace App\Services\Library;
 use App\Contracts\Repositories\UserFollowRepository;
 use App\Contracts\Repositories\UserRepository;
 use App\Models\User;
+use App\Notifications\UserFollowedYou;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Validation\ValidationException;
@@ -68,7 +69,17 @@ final class UserFollowService
             throw ValidationException::withMessages(['id' => 'You cannot follow yourself.']);
         }
 
-        return $this->follows->add($follower, $followed);
+        $wasNew = $this->follows->add($follower, $followed);
+
+        /*
+         | Only on a genuinely new follow. `add()` is idempotent, and notifying
+         | on every call would let anyone spam an inbox by toggling the button.
+         */
+        if ($wasNew) {
+            $followed->notify(new UserFollowedYou($follower));
+        }
+
+        return $wasNew;
     }
 
     /**
