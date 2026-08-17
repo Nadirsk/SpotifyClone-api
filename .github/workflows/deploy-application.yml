@@ -58,10 +58,22 @@ jobs:
         with:
           name: app-build
 
-      - name: Resolve password (vault fallback if embedded password fails)
-        id: pw
+      - name: Mask deploy key in logs
         env:
-          EMBEDDED_PW: ${{ matrix.server.password }}
+          DEPLOYMENT_CONFIG: ${{ secrets.DEPLOYMENT_CONFIG }}
+        run: |
+          # Register every line of the embedded SSH key as a log mask for this job.
+          # Read from the DEPLOYMENT_CONFIG *secret* (GitHub masks it) and never
+          # echoed, so this step leaks nothing — and it makes matrix.server.key show
+          # as *** in later steps' env dumps (job-output values lose secret masking).
+          printf '%s' "${DEPLOYMENT_CONFIG:-}" \
+            | jq -r '(if type=="array" then .[] else . end) | .key // empty' 2>/dev/null \
+            | while IFS= read -r l; do [ -n "$l" ] && printf '::add-mask::%s\n' "$l"; done || true
+
+      - name: Resolve SSH key (vault fallback if embedded key fails)
+        id: sshkey
+        env:
+          EMBEDDED_KEY: ${{ matrix.server.key }}
           HOST: ${{ matrix.server.ip }}
           SSH_USER: ${{ matrix.server.username }}
           SSH_PORT: ${{ matrix.server.port }}
@@ -70,73 +82,83 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -u
-          echo "::add-mask::${EMBEDDED_PW:-}"
-          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          KEY_FILE="$RUNNER_TEMP/sp_deploy_key"
+          umask 077; : > "$KEY_FILE"
+          # Effective SSH user: defaults to the matrix value; ServerPilot may
+          # override it on recovery (e.g. root -> deploy after de-rooting).
           EFFECTIVE_USER="$SSH_USER"
-          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
-          pw_ok() {
-            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
-              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+          # Expose the working key to appleboy as a (masked) step output. appleboy
+          # runs in a Docker container and cannot read a key file written on the
+          # runner host ($RUNNER_TEMP is not mounted), so the key must be passed as
+          # content via the `key:` input — every line is masked first.
+          emit_key() {
+            while IFS= read -r l; do [ -n "$l" ] && echo "::add-mask::$l"; done < "$KEY_FILE"
+            { echo "key<<__SP_KEY_EOF__"; cat "$KEY_FILE"; echo "__SP_KEY_EOF__"; } >> "$GITHUB_OUTPUT"
           }
-          # Retry the embedded probe a few times: a single transient SSH throttle
-          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
-          # 10s connect blip) must not flip us into the vault-fallback path when
-          # the embedded password is actually fine.
-          pw_ok_retry() {
-            for _i in 1 2 3; do
-              pw_ok "$1" && return 0
-              sleep 3
+
+          # Password-auth hosts have no embedded key — appleboy uses the password; nothing to recover.
+          if [ -z "${EMBEDDED_KEY:-}" ]; then
+            echo "No embedded SSH key (password-auth host); skipping key fallback."
+            exit 0
+          fi
+
+          printf '%s' "$EMBEDDED_KEY" > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+          ssh_as() { ssh -i "$KEY_FILE" -p "${SSH_PORT:-22}" -o BatchMode=yes \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${1}@${HOST}" true 2>/dev/null; }
+          # Probe the current key against each candidate user; the first that
+          # authenticates wins and becomes EFFECTIVE_USER. The aaibuzz fleet de-roots
+          # some hosts to 'deploy' (e.g. 65.20.87.148), so we must try 'deploy' even
+          # when the config still says 'root' and resolve-key returns no username.
+          try_users() {
+            for u in "$@"; do
+              [ -z "$u" ] && continue
+              if ssh_as "$u"; then
+                EFFECTIVE_USER="$u"
+                echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+                return 0
+              fi
             done
             return 1
           }
-          emit() {
-            echo "::add-mask::$1"
-            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
-            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
-          }
-          # 1) embedded password from DEPLOYMENT_CONFIG
-          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
-            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
-          fi
-          # 2) embedded missing/stale — pull the current password from the vault
+
+          if try_users "$SSH_USER" deploy; then echo "Embedded deploy key OK (user: $EFFECTIVE_USER)."; emit_key; exit 0; fi
+
           if [ -z "${DEPLOY_TOKEN:-}" ]; then
-            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
-            emit "${EMBEDDED_PW:-}"; exit 0
+            echo "::warning::Embedded key failed and no DEPLOY_TOKEN secret set — cannot fall back to vault."
+            emit_key
+            exit 0
           fi
-          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
-          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+
+          echo "Embedded key failed — requesting current key from ServerPilot vault (host-local call)."
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          RESP="$(curl -s -L -X POST "$API/api/deploy/resolve-key" \
             -H "Authorization: Bearer $DEPLOY_TOKEN" \
             -H "Content-Type: application/json" -H "Accept: application/json" \
             -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
-          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
-          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
-            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
-            echo "::add-mask::$NEW_PW"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "ssh_key" ]; then
+            printf '%s' "$RESP" | jq -r '.data.key' > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+            # ServerPilot may have de-rooted this project; switch the connecting
+            # user too (the recovered key belongs to that user, e.g. deploy).
             NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
-            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
-              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
-              EFFECTIVE_USER="$NEW_USER"
+            if try_users "$NEW_USER" "$SSH_USER" deploy; then
+              echo "Recovered via vault key (user: $EFFECTIVE_USER)."; emit_key
+            else
+              echo "::error::Vault key also failed for $HOST (tried users:${NEW_USER:+ $NEW_USER} $SSH_USER deploy). The private key resolved from the vault is valid, but its public half is not in the target user's ~/.ssh/authorized_keys on $HOST -- install the matching public key there."
+              exit 1
             fi
-            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
-              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
-            fi
-            echo "::error::Vault password also failed for $HOST"; exit 1
           else
-            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
-            if [ -n "${EMBEDDED_PW:-}" ]; then
-              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
-              emit "$EMBEDDED_PW"; exit 0
-            fi
-            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+            echo "::error::resolve-key returned no ssh_key for $HOST"
+            exit 1
           fi
 
       - name: Upload
         uses: appleboy/scp-action@master
         with:
           host: ${{ matrix.server.ip }}
-          username: ${{ steps.pw.outputs.username }}
-          password: ${{ steps.pw.outputs.password }}
+          username: ${{ steps.sshkey.outputs.username }}
+          key: ${{ steps.sshkey.outputs.key }}
+          password: ${{ matrix.server.password }}
           port: ${{ matrix.server.port }}
           source: ${{ github.sha }}.tar.gz
           target: ${{ matrix.server.path }}/artifacts
@@ -147,8 +169,9 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
         with:
           host: ${{ matrix.server.ip }}
-          username: ${{ steps.pw.outputs.username }}
-          password: ${{ steps.pw.outputs.password }}
+          username: ${{ steps.sshkey.outputs.username }}
+          key: ${{ steps.sshkey.outputs.key }}
+          password: ${{ matrix.server.password }}
           port: ${{ matrix.server.port }}
           envs: GITHUB_SHA
           script: |
@@ -177,10 +200,22 @@ jobs:
       matrix:
         server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
     steps:
-      - name: Resolve password (vault fallback if embedded password fails)
-        id: pw
+      - name: Mask deploy key in logs
         env:
-          EMBEDDED_PW: ${{ matrix.server.password }}
+          DEPLOYMENT_CONFIG: ${{ secrets.DEPLOYMENT_CONFIG }}
+        run: |
+          # Register every line of the embedded SSH key as a log mask for this job.
+          # Read from the DEPLOYMENT_CONFIG *secret* (GitHub masks it) and never
+          # echoed, so this step leaks nothing — and it makes matrix.server.key show
+          # as *** in later steps' env dumps (job-output values lose secret masking).
+          printf '%s' "${DEPLOYMENT_CONFIG:-}" \
+            | jq -r '(if type=="array" then .[] else . end) | .key // empty' 2>/dev/null \
+            | while IFS= read -r l; do [ -n "$l" ] && printf '::add-mask::%s\n' "$l"; done || true
+
+      - name: Resolve SSH key (vault fallback if embedded key fails)
+        id: sshkey
+        env:
+          EMBEDDED_KEY: ${{ matrix.server.key }}
           HOST: ${{ matrix.server.ip }}
           SSH_USER: ${{ matrix.server.username }}
           SSH_PORT: ${{ matrix.server.port }}
@@ -189,65 +224,68 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -u
-          echo "::add-mask::${EMBEDDED_PW:-}"
-          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          KEY_FILE="$RUNNER_TEMP/sp_deploy_key"
+          umask 077; : > "$KEY_FILE"
+          # Effective SSH user: defaults to the matrix value; ServerPilot may
+          # override it on recovery (e.g. root -> deploy after de-rooting).
           EFFECTIVE_USER="$SSH_USER"
-          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
-          pw_ok() {
-            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
-              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+          # Expose the working key to appleboy as a (masked) step output. appleboy
+          # runs in a Docker container and cannot read a key file written on the
+          # runner host ($RUNNER_TEMP is not mounted), so the key must be passed as
+          # content via the `key:` input — every line is masked first.
+          emit_key() {
+            while IFS= read -r l; do [ -n "$l" ] && echo "::add-mask::$l"; done < "$KEY_FILE"
+            { echo "key<<__SP_KEY_EOF__"; cat "$KEY_FILE"; echo "__SP_KEY_EOF__"; } >> "$GITHUB_OUTPUT"
           }
-          # Retry the embedded probe a few times: a single transient SSH throttle
-          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
-          # 10s connect blip) must not flip us into the vault-fallback path when
-          # the embedded password is actually fine.
-          pw_ok_retry() {
-            for _i in 1 2 3; do
-              pw_ok "$1" && return 0
-              sleep 3
+          if [ -z "${EMBEDDED_KEY:-}" ]; then
+            echo "No embedded SSH key (password-auth host); skipping key fallback."
+            exit 0
+          fi
+          printf '%s' "$EMBEDDED_KEY" > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+          ssh_as() { ssh -i "$KEY_FILE" -p "${SSH_PORT:-22}" -o BatchMode=yes \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${1}@${HOST}" true 2>/dev/null; }
+          # Probe the current key against each candidate user; the first that
+          # authenticates wins and becomes EFFECTIVE_USER. The aaibuzz fleet de-roots
+          # some hosts to 'deploy' (e.g. 65.20.87.148), so we must try 'deploy' even
+          # when the config still says 'root' and resolve-key returns no username.
+          try_users() {
+            for u in "$@"; do
+              [ -z "$u" ] && continue
+              if ssh_as "$u"; then
+                EFFECTIVE_USER="$u"
+                echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+                return 0
+              fi
             done
             return 1
           }
-          emit() {
-            echo "::add-mask::$1"
-            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
-            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
-          }
-          # 1) embedded password from DEPLOYMENT_CONFIG
-          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
-            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
-          fi
-          # 2) embedded missing/stale — pull the current password from the vault
+          if try_users "$SSH_USER" deploy; then echo "Embedded deploy key OK (user: $EFFECTIVE_USER)."; emit_key; exit 0; fi
           if [ -z "${DEPLOY_TOKEN:-}" ]; then
-            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
-            emit "${EMBEDDED_PW:-}"; exit 0
+            echo "::warning::Embedded key failed and no DEPLOY_TOKEN secret set — cannot fall back to vault."
+            emit_key
+            exit 0
           fi
-          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
-          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+          echo "Embedded key failed — requesting current key from ServerPilot vault (host-local call)."
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          RESP="$(curl -s -L -X POST "$API/api/deploy/resolve-key" \
             -H "Authorization: Bearer $DEPLOY_TOKEN" \
             -H "Content-Type: application/json" -H "Accept: application/json" \
             -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
-          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
-          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
-            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
-            echo "::add-mask::$NEW_PW"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "ssh_key" ]; then
+            printf '%s' "$RESP" | jq -r '.data.key' > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+            # ServerPilot may have de-rooted this project; switch the connecting
+            # user too (the recovered key belongs to that user, e.g. deploy).
             NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
-            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
-              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
-              EFFECTIVE_USER="$NEW_USER"
+            if try_users "$NEW_USER" "$SSH_USER" deploy; then
+              echo "Recovered via vault key (user: $EFFECTIVE_USER)."; emit_key
+            else
+              echo "::error::Vault key also failed for $HOST (tried users:${NEW_USER:+ $NEW_USER} $SSH_USER deploy). The private key resolved from the vault is valid, but its public half is not in the target user's ~/.ssh/authorized_keys on $HOST -- install the matching public key there."
+              exit 1
             fi
-            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
-              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
-            fi
-            echo "::error::Vault password also failed for $HOST"; exit 1
           else
-            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
-            if [ -n "${EMBEDDED_PW:-}" ]; then
-              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
-              emit "$EMBEDDED_PW"; exit 0
-            fi
-            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+            echo "::error::resolve-key returned no ssh_key for $HOST"
+            exit 1
           fi
 
       - name: Runs before hooks
@@ -260,8 +298,9 @@ jobs:
           BASE_PATH: ${{ matrix.server.path }}
         with:
           host: ${{ matrix.server.ip }}
-          username: ${{ steps.pw.outputs.username }}
-          password: ${{ steps.pw.outputs.password }}
+          username: ${{ steps.sshkey.outputs.username }}
+          key: ${{ steps.sshkey.outputs.key }}
+          password: ${{ matrix.server.password }}
           port: ${{ matrix.server.port }}
           envs: GITHUB_SHA, RELEASE_PATH, ACTIVE_PATH, STORAGE_PATH, BASE_PATH
           script: |
@@ -276,10 +315,22 @@ jobs:
       matrix:
         server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
     steps:
-      - name: Resolve password (vault fallback if embedded password fails)
-        id: pw
+      - name: Mask deploy key in logs
         env:
-          EMBEDDED_PW: ${{ matrix.server.password }}
+          DEPLOYMENT_CONFIG: ${{ secrets.DEPLOYMENT_CONFIG }}
+        run: |
+          # Register every line of the embedded SSH key as a log mask for this job.
+          # Read from the DEPLOYMENT_CONFIG *secret* (GitHub masks it) and never
+          # echoed, so this step leaks nothing — and it makes matrix.server.key show
+          # as *** in later steps' env dumps (job-output values lose secret masking).
+          printf '%s' "${DEPLOYMENT_CONFIG:-}" \
+            | jq -r '(if type=="array" then .[] else . end) | .key // empty' 2>/dev/null \
+            | while IFS= read -r l; do [ -n "$l" ] && printf '::add-mask::%s\n' "$l"; done || true
+
+      - name: Resolve SSH key (vault fallback if embedded key fails)
+        id: sshkey
+        env:
+          EMBEDDED_KEY: ${{ matrix.server.key }}
           HOST: ${{ matrix.server.ip }}
           SSH_USER: ${{ matrix.server.username }}
           SSH_PORT: ${{ matrix.server.port }}
@@ -288,65 +339,68 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -u
-          echo "::add-mask::${EMBEDDED_PW:-}"
-          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          KEY_FILE="$RUNNER_TEMP/sp_deploy_key"
+          umask 077; : > "$KEY_FILE"
+          # Effective SSH user: defaults to the matrix value; ServerPilot may
+          # override it on recovery (e.g. root -> deploy after de-rooting).
           EFFECTIVE_USER="$SSH_USER"
-          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
-          pw_ok() {
-            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
-              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+          # Expose the working key to appleboy as a (masked) step output. appleboy
+          # runs in a Docker container and cannot read a key file written on the
+          # runner host ($RUNNER_TEMP is not mounted), so the key must be passed as
+          # content via the `key:` input — every line is masked first.
+          emit_key() {
+            while IFS= read -r l; do [ -n "$l" ] && echo "::add-mask::$l"; done < "$KEY_FILE"
+            { echo "key<<__SP_KEY_EOF__"; cat "$KEY_FILE"; echo "__SP_KEY_EOF__"; } >> "$GITHUB_OUTPUT"
           }
-          # Retry the embedded probe a few times: a single transient SSH throttle
-          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
-          # 10s connect blip) must not flip us into the vault-fallback path when
-          # the embedded password is actually fine.
-          pw_ok_retry() {
-            for _i in 1 2 3; do
-              pw_ok "$1" && return 0
-              sleep 3
+          if [ -z "${EMBEDDED_KEY:-}" ]; then
+            echo "No embedded SSH key (password-auth host); skipping key fallback."
+            exit 0
+          fi
+          printf '%s' "$EMBEDDED_KEY" > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+          ssh_as() { ssh -i "$KEY_FILE" -p "${SSH_PORT:-22}" -o BatchMode=yes \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${1}@${HOST}" true 2>/dev/null; }
+          # Probe the current key against each candidate user; the first that
+          # authenticates wins and becomes EFFECTIVE_USER. The aaibuzz fleet de-roots
+          # some hosts to 'deploy' (e.g. 65.20.87.148), so we must try 'deploy' even
+          # when the config still says 'root' and resolve-key returns no username.
+          try_users() {
+            for u in "$@"; do
+              [ -z "$u" ] && continue
+              if ssh_as "$u"; then
+                EFFECTIVE_USER="$u"
+                echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+                return 0
+              fi
             done
             return 1
           }
-          emit() {
-            echo "::add-mask::$1"
-            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
-            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
-          }
-          # 1) embedded password from DEPLOYMENT_CONFIG
-          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
-            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
-          fi
-          # 2) embedded missing/stale — pull the current password from the vault
+          if try_users "$SSH_USER" deploy; then echo "Embedded deploy key OK (user: $EFFECTIVE_USER)."; emit_key; exit 0; fi
           if [ -z "${DEPLOY_TOKEN:-}" ]; then
-            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
-            emit "${EMBEDDED_PW:-}"; exit 0
+            echo "::warning::Embedded key failed and no DEPLOY_TOKEN secret set — cannot fall back to vault."
+            emit_key
+            exit 0
           fi
-          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
-          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+          echo "Embedded key failed — requesting current key from ServerPilot vault (host-local call)."
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          RESP="$(curl -s -L -X POST "$API/api/deploy/resolve-key" \
             -H "Authorization: Bearer $DEPLOY_TOKEN" \
             -H "Content-Type: application/json" -H "Accept: application/json" \
             -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
-          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
-          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
-            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
-            echo "::add-mask::$NEW_PW"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "ssh_key" ]; then
+            printf '%s' "$RESP" | jq -r '.data.key' > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+            # ServerPilot may have de-rooted this project; switch the connecting
+            # user too (the recovered key belongs to that user, e.g. deploy).
             NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
-            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
-              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
-              EFFECTIVE_USER="$NEW_USER"
+            if try_users "$NEW_USER" "$SSH_USER" deploy; then
+              echo "Recovered via vault key (user: $EFFECTIVE_USER)."; emit_key
+            else
+              echo "::error::Vault key also failed for $HOST (tried users:${NEW_USER:+ $NEW_USER} $SSH_USER deploy). The private key resolved from the vault is valid, but its public half is not in the target user's ~/.ssh/authorized_keys on $HOST -- install the matching public key there."
+              exit 1
             fi
-            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
-              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
-            fi
-            echo "::error::Vault password also failed for $HOST"; exit 1
           else
-            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
-            if [ -n "${EMBEDDED_PW:-}" ]; then
-              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
-              emit "$EMBEDDED_PW"; exit 0
-            fi
-            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+            echo "::error::resolve-key returned no ssh_key for $HOST"
+            exit 1
           fi
 
       - name: Activate release
@@ -367,8 +421,9 @@ jobs:
           FPM_SOCKET: ${{ matrix.server.fpmSocket }}
         with:
           host: ${{ matrix.server.ip }}
-          username: ${{ steps.pw.outputs.username }}
-          password: ${{ steps.pw.outputs.password }}
+          username: ${{ steps.sshkey.outputs.username }}
+          key: ${{ steps.sshkey.outputs.key }}
+          password: ${{ matrix.server.password }}
           port: ${{ matrix.server.port }}
           envs: GITHUB_SHA, RELEASE_PATH, ACTIVE_RELEASE_PATH, STORAGE_PATH, BASE_PATH, LARAVEL_ENV, VIRTUAL_HOST_FILE_PATH, SERVER_NAME, SERVER_ALIAS, SERVER_ADMIN, REFRESH_VIRTUAL_HOST, VIRTUAL_HOST_FILE, FPM_SOCKET
           script: |
@@ -528,10 +583,22 @@ jobs:
       matrix:
         server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
     steps:
-      - name: Resolve password (vault fallback if embedded password fails)
-        id: pw
+      - name: Mask deploy key in logs
         env:
-          EMBEDDED_PW: ${{ matrix.server.password }}
+          DEPLOYMENT_CONFIG: ${{ secrets.DEPLOYMENT_CONFIG }}
+        run: |
+          # Register every line of the embedded SSH key as a log mask for this job.
+          # Read from the DEPLOYMENT_CONFIG *secret* (GitHub masks it) and never
+          # echoed, so this step leaks nothing — and it makes matrix.server.key show
+          # as *** in later steps' env dumps (job-output values lose secret masking).
+          printf '%s' "${DEPLOYMENT_CONFIG:-}" \
+            | jq -r '(if type=="array" then .[] else . end) | .key // empty' 2>/dev/null \
+            | while IFS= read -r l; do [ -n "$l" ] && printf '::add-mask::%s\n' "$l"; done || true
+
+      - name: Resolve SSH key (vault fallback if embedded key fails)
+        id: sshkey
+        env:
+          EMBEDDED_KEY: ${{ matrix.server.key }}
           HOST: ${{ matrix.server.ip }}
           SSH_USER: ${{ matrix.server.username }}
           SSH_PORT: ${{ matrix.server.port }}
@@ -540,65 +607,68 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -u
-          echo "::add-mask::${EMBEDDED_PW:-}"
-          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          KEY_FILE="$RUNNER_TEMP/sp_deploy_key"
+          umask 077; : > "$KEY_FILE"
+          # Effective SSH user: defaults to the matrix value; ServerPilot may
+          # override it on recovery (e.g. root -> deploy after de-rooting).
           EFFECTIVE_USER="$SSH_USER"
-          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
-          pw_ok() {
-            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
-              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+          # Expose the working key to appleboy as a (masked) step output. appleboy
+          # runs in a Docker container and cannot read a key file written on the
+          # runner host ($RUNNER_TEMP is not mounted), so the key must be passed as
+          # content via the `key:` input — every line is masked first.
+          emit_key() {
+            while IFS= read -r l; do [ -n "$l" ] && echo "::add-mask::$l"; done < "$KEY_FILE"
+            { echo "key<<__SP_KEY_EOF__"; cat "$KEY_FILE"; echo "__SP_KEY_EOF__"; } >> "$GITHUB_OUTPUT"
           }
-          # Retry the embedded probe a few times: a single transient SSH throttle
-          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
-          # 10s connect blip) must not flip us into the vault-fallback path when
-          # the embedded password is actually fine.
-          pw_ok_retry() {
-            for _i in 1 2 3; do
-              pw_ok "$1" && return 0
-              sleep 3
+          if [ -z "${EMBEDDED_KEY:-}" ]; then
+            echo "No embedded SSH key (password-auth host); skipping key fallback."
+            exit 0
+          fi
+          printf '%s' "$EMBEDDED_KEY" > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+          ssh_as() { ssh -i "$KEY_FILE" -p "${SSH_PORT:-22}" -o BatchMode=yes \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${1}@${HOST}" true 2>/dev/null; }
+          # Probe the current key against each candidate user; the first that
+          # authenticates wins and becomes EFFECTIVE_USER. The aaibuzz fleet de-roots
+          # some hosts to 'deploy' (e.g. 65.20.87.148), so we must try 'deploy' even
+          # when the config still says 'root' and resolve-key returns no username.
+          try_users() {
+            for u in "$@"; do
+              [ -z "$u" ] && continue
+              if ssh_as "$u"; then
+                EFFECTIVE_USER="$u"
+                echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+                return 0
+              fi
             done
             return 1
           }
-          emit() {
-            echo "::add-mask::$1"
-            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
-            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
-          }
-          # 1) embedded password from DEPLOYMENT_CONFIG
-          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
-            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
-          fi
-          # 2) embedded missing/stale — pull the current password from the vault
+          if try_users "$SSH_USER" deploy; then echo "Embedded deploy key OK (user: $EFFECTIVE_USER)."; emit_key; exit 0; fi
           if [ -z "${DEPLOY_TOKEN:-}" ]; then
-            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
-            emit "${EMBEDDED_PW:-}"; exit 0
+            echo "::warning::Embedded key failed and no DEPLOY_TOKEN secret set — cannot fall back to vault."
+            emit_key
+            exit 0
           fi
-          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
-          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+          echo "Embedded key failed — requesting current key from ServerPilot vault (host-local call)."
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          RESP="$(curl -s -L -X POST "$API/api/deploy/resolve-key" \
             -H "Authorization: Bearer $DEPLOY_TOKEN" \
             -H "Content-Type: application/json" -H "Accept: application/json" \
             -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
-          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
-          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
-            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
-            echo "::add-mask::$NEW_PW"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "ssh_key" ]; then
+            printf '%s' "$RESP" | jq -r '.data.key' > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+            # ServerPilot may have de-rooted this project; switch the connecting
+            # user too (the recovered key belongs to that user, e.g. deploy).
             NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
-            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
-              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
-              EFFECTIVE_USER="$NEW_USER"
+            if try_users "$NEW_USER" "$SSH_USER" deploy; then
+              echo "Recovered via vault key (user: $EFFECTIVE_USER)."; emit_key
+            else
+              echo "::error::Vault key also failed for $HOST (tried users:${NEW_USER:+ $NEW_USER} $SSH_USER deploy). The private key resolved from the vault is valid, but its public half is not in the target user's ~/.ssh/authorized_keys on $HOST -- install the matching public key there."
+              exit 1
             fi
-            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
-              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
-            fi
-            echo "::error::Vault password also failed for $HOST"; exit 1
           else
-            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
-            if [ -n "${EMBEDDED_PW:-}" ]; then
-              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
-              emit "$EMBEDDED_PW"; exit 0
-            fi
-            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+            echo "::error::resolve-key returned no ssh_key for $HOST"
+            exit 1
           fi
 
       - name: Runs after hooks
@@ -611,8 +681,9 @@ jobs:
           BASE_PATH: ${{ matrix.server.path }}
         with:
           host: ${{ matrix.server.ip }}
-          username: ${{ steps.pw.outputs.username }}
-          password: ${{ steps.pw.outputs.password }}
+          username: ${{ steps.sshkey.outputs.username }}
+          key: ${{ steps.sshkey.outputs.key }}
+          password: ${{ matrix.server.password }}
           port: ${{ matrix.server.port }}
           envs: GITHUB_SHA, RELEASE_PATH, ACTIVE_PATH, STORAGE_PATH, BASE_PATH
           script: |
@@ -632,10 +703,22 @@ jobs:
       matrix:
         server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
     steps:
-      - name: Resolve password (vault fallback if embedded password fails)
-        id: pw
+      - name: Mask deploy key in logs
         env:
-          EMBEDDED_PW: ${{ matrix.server.password }}
+          DEPLOYMENT_CONFIG: ${{ secrets.DEPLOYMENT_CONFIG }}
+        run: |
+          # Register every line of the embedded SSH key as a log mask for this job.
+          # Read from the DEPLOYMENT_CONFIG *secret* (GitHub masks it) and never
+          # echoed, so this step leaks nothing — and it makes matrix.server.key show
+          # as *** in later steps' env dumps (job-output values lose secret masking).
+          printf '%s' "${DEPLOYMENT_CONFIG:-}" \
+            | jq -r '(if type=="array" then .[] else . end) | .key // empty' 2>/dev/null \
+            | while IFS= read -r l; do [ -n "$l" ] && printf '::add-mask::%s\n' "$l"; done || true
+
+      - name: Resolve SSH key (vault fallback if embedded key fails)
+        id: sshkey
+        env:
+          EMBEDDED_KEY: ${{ matrix.server.key }}
           HOST: ${{ matrix.server.ip }}
           SSH_USER: ${{ matrix.server.username }}
           SSH_PORT: ${{ matrix.server.port }}
@@ -644,65 +727,68 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -u
-          echo "::add-mask::${EMBEDDED_PW:-}"
-          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          KEY_FILE="$RUNNER_TEMP/sp_deploy_key"
+          umask 077; : > "$KEY_FILE"
+          # Effective SSH user: defaults to the matrix value; ServerPilot may
+          # override it on recovery (e.g. root -> deploy after de-rooting).
           EFFECTIVE_USER="$SSH_USER"
-          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
-          pw_ok() {
-            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
-              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+          # Expose the working key to appleboy as a (masked) step output. appleboy
+          # runs in a Docker container and cannot read a key file written on the
+          # runner host ($RUNNER_TEMP is not mounted), so the key must be passed as
+          # content via the `key:` input — every line is masked first.
+          emit_key() {
+            while IFS= read -r l; do [ -n "$l" ] && echo "::add-mask::$l"; done < "$KEY_FILE"
+            { echo "key<<__SP_KEY_EOF__"; cat "$KEY_FILE"; echo "__SP_KEY_EOF__"; } >> "$GITHUB_OUTPUT"
           }
-          # Retry the embedded probe a few times: a single transient SSH throttle
-          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
-          # 10s connect blip) must not flip us into the vault-fallback path when
-          # the embedded password is actually fine.
-          pw_ok_retry() {
-            for _i in 1 2 3; do
-              pw_ok "$1" && return 0
-              sleep 3
+          if [ -z "${EMBEDDED_KEY:-}" ]; then
+            echo "No embedded SSH key (password-auth host); skipping key fallback."
+            exit 0
+          fi
+          printf '%s' "$EMBEDDED_KEY" > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+          ssh_as() { ssh -i "$KEY_FILE" -p "${SSH_PORT:-22}" -o BatchMode=yes \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${1}@${HOST}" true 2>/dev/null; }
+          # Probe the current key against each candidate user; the first that
+          # authenticates wins and becomes EFFECTIVE_USER. The aaibuzz fleet de-roots
+          # some hosts to 'deploy' (e.g. 65.20.87.148), so we must try 'deploy' even
+          # when the config still says 'root' and resolve-key returns no username.
+          try_users() {
+            for u in "$@"; do
+              [ -z "$u" ] && continue
+              if ssh_as "$u"; then
+                EFFECTIVE_USER="$u"
+                echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+                return 0
+              fi
             done
             return 1
           }
-          emit() {
-            echo "::add-mask::$1"
-            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
-            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
-          }
-          # 1) embedded password from DEPLOYMENT_CONFIG
-          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
-            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
-          fi
-          # 2) embedded missing/stale — pull the current password from the vault
+          if try_users "$SSH_USER" deploy; then echo "Embedded deploy key OK (user: $EFFECTIVE_USER)."; emit_key; exit 0; fi
           if [ -z "${DEPLOY_TOKEN:-}" ]; then
-            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
-            emit "${EMBEDDED_PW:-}"; exit 0
+            echo "::warning::Embedded key failed and no DEPLOY_TOKEN secret set — cannot fall back to vault."
+            emit_key
+            exit 0
           fi
-          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
-          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+          echo "Embedded key failed — requesting current key from ServerPilot vault (host-local call)."
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          RESP="$(curl -s -L -X POST "$API/api/deploy/resolve-key" \
             -H "Authorization: Bearer $DEPLOY_TOKEN" \
             -H "Content-Type: application/json" -H "Accept: application/json" \
             -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
-          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
-          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
-            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
-            echo "::add-mask::$NEW_PW"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "ssh_key" ]; then
+            printf '%s' "$RESP" | jq -r '.data.key' > "$KEY_FILE"; chmod 600 "$KEY_FILE"
+            # ServerPilot may have de-rooted this project; switch the connecting
+            # user too (the recovered key belongs to that user, e.g. deploy).
             NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
-            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
-              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
-              EFFECTIVE_USER="$NEW_USER"
+            if try_users "$NEW_USER" "$SSH_USER" deploy; then
+              echo "Recovered via vault key (user: $EFFECTIVE_USER)."; emit_key
+            else
+              echo "::error::Vault key also failed for $HOST (tried users:${NEW_USER:+ $NEW_USER} $SSH_USER deploy). The private key resolved from the vault is valid, but its public half is not in the target user's ~/.ssh/authorized_keys on $HOST -- install the matching public key there."
+              exit 1
             fi
-            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
-              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
-            fi
-            echo "::error::Vault password also failed for $HOST"; exit 1
           else
-            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
-            if [ -n "${EMBEDDED_PW:-}" ]; then
-              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
-              emit "$EMBEDDED_PW"; exit 0
-            fi
-            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+            echo "::error::resolve-key returned no ssh_key for $HOST"
+            exit 1
           fi
 
       - name: Runs clean up
@@ -712,8 +798,9 @@ jobs:
           RELEASE_PATH: ${{ matrix.server.path }}/releases
         with:
           host: ${{ matrix.server.ip }}
-          username: ${{ steps.pw.outputs.username }}
-          password: ${{ steps.pw.outputs.password }}
+          username: ${{ steps.sshkey.outputs.username }}
+          key: ${{ steps.sshkey.outputs.key }}
+          password: ${{ matrix.server.password }}
           port: ${{ matrix.server.port }}
           envs: RELEASE_PATH, ARTIFACTS_PATH
           script: |
