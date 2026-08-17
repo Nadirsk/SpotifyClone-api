@@ -1,0 +1,721 @@
+name: Deploy Laravel Application
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  create-deployment-artifacts:
+    name: Create deployment artifacts
+    runs-on: self-hosted
+    outputs:
+      DEPLOYMENT_MATRIX: ${{ steps.export-deployment-matrix.outputs.DEPLOYMENT_MATRIX }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure PHP 8.3
+        uses: shivammathur/setup-php@master
+        with:
+          php-version: 8.3
+          extensions: mbstring, ctype, fileinfo, openssl, PDO, bcmath, json, tokenizer, xml, gd
+
+      - name: Install composer dependencies
+        run: composer install --no-dev --no-interaction --prefer-dist
+
+      - name: Create deployment artifact
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: tar -czf "${GITHUB_SHA}".tar.gz --exclude=*.git --exclude=node_modules *
+
+      - name: Store artifact for distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-build
+          path: ${{ github.sha }}.tar.gz
+
+      - name: Retrieve deployment-config.json from Secrets
+        run: echo '${{ secrets.DEPLOYMENT_CONFIG }}' | jq '.' > deployment-config.json
+
+      - name: Export deployment artifacts
+        id: export-deployment-matrix
+        run: |
+          delimiter="$(openssl rand -hex 8)"
+          JSON=$(cat deployment-config.json)
+          echo "DEPLOYMENT_MATRIX<<${delimiter}" >> "${GITHUB_OUTPUT}"
+          echo "$JSON" >> "${GITHUB_OUTPUT}"
+          echo "${delimiter}" >> "${GITHUB_OUTPUT}"
+
+  prepare-release-on-server:
+    runs-on: self-hosted
+    needs: create-deployment-artifacts
+    strategy:
+      matrix:
+        server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-build
+
+      - name: Resolve password (vault fallback if embedded password fails)
+        id: pw
+        env:
+          EMBEDDED_PW: ${{ matrix.server.password }}
+          HOST: ${{ matrix.server.ip }}
+          SSH_USER: ${{ matrix.server.username }}
+          SSH_PORT: ${{ matrix.server.port }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          SP_API: ${{ vars.SERVERPILOT_API_URL }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          echo "::add-mask::${EMBEDDED_PW:-}"
+          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          EFFECTIVE_USER="$SSH_USER"
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          pw_ok() {
+            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
+              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          }
+          # Retry the embedded probe a few times: a single transient SSH throttle
+          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
+          # 10s connect blip) must not flip us into the vault-fallback path when
+          # the embedded password is actually fine.
+          pw_ok_retry() {
+            for _i in 1 2 3; do
+              pw_ok "$1" && return 0
+              sleep 3
+            done
+            return 1
+          }
+          emit() {
+            echo "::add-mask::$1"
+            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
+          }
+          # 1) embedded password from DEPLOYMENT_CONFIG
+          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
+            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
+          fi
+          # 2) embedded missing/stale — pull the current password from the vault
+          if [ -z "${DEPLOY_TOKEN:-}" ]; then
+            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
+            emit "${EMBEDDED_PW:-}"; exit 0
+          fi
+          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
+          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+            -H "Authorization: Bearer $DEPLOY_TOKEN" \
+            -H "Content-Type: application/json" -H "Accept: application/json" \
+            -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
+          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
+            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
+            echo "::add-mask::$NEW_PW"
+            NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
+            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
+              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
+              EFFECTIVE_USER="$NEW_USER"
+            fi
+            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
+              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
+            fi
+            echo "::error::Vault password also failed for $HOST"; exit 1
+          else
+            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
+            if [ -n "${EMBEDDED_PW:-}" ]; then
+              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
+              emit "$EMBEDDED_PW"; exit 0
+            fi
+            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+          fi
+
+      - name: Upload
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ matrix.server.ip }}
+          username: ${{ steps.pw.outputs.username }}
+          password: ${{ steps.pw.outputs.password }}
+          port: ${{ matrix.server.port }}
+          source: ${{ github.sha }}.tar.gz
+          target: ${{ matrix.server.path }}/artifacts
+
+      - name: Extract archive and create directories
+        uses: appleboy/ssh-action@master
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        with:
+          host: ${{ matrix.server.ip }}
+          username: ${{ steps.pw.outputs.username }}
+          password: ${{ steps.pw.outputs.password }}
+          port: ${{ matrix.server.port }}
+          envs: GITHUB_SHA
+          script: |
+            # Create a new directory with the commit hash as the directory name
+            mkdir -p "${{ matrix.server.path }}/releases/${GITHUB_SHA}"
+
+            # Extract the tar file into our release directory
+            tar xzf ${{ matrix.server.path }}/artifacts/${GITHUB_SHA}.tar.gz -C "${{ matrix.server.path }}/releases/${GITHUB_SHA}"
+
+            # To delete the storage folder from the release directory
+            rm -rf ${{ matrix.server.path }}/releases/${GITHUB_SHA}/storage
+
+            # Create Laravel storage directories and set permissions
+            mkdir -p ${{ matrix.server.path }}/storage/{app,public,framework,logs}
+            mkdir -p ${{ matrix.server.path }}/storage/framework/{cache,sessions,testing,views}
+            mkdir -p ${{ matrix.server.path }}/storage/framework/cache/data
+            # storage dirs are setgid drwxrwsrwx already; a non-owner deploy user
+            # can't chmod www-data-owned runtime files, so never let this fail the build.
+            chmod -R 0777 ${{ matrix.server.path }}/storage 2>/dev/null || true
+
+  run-before-hooks:
+    name: "${{ matrix.server.name }}: Before hook"
+    runs-on: self-hosted
+    needs: [create-deployment-artifacts, prepare-release-on-server]
+    strategy:
+      matrix:
+        server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
+    steps:
+      - name: Resolve password (vault fallback if embedded password fails)
+        id: pw
+        env:
+          EMBEDDED_PW: ${{ matrix.server.password }}
+          HOST: ${{ matrix.server.ip }}
+          SSH_USER: ${{ matrix.server.username }}
+          SSH_PORT: ${{ matrix.server.port }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          SP_API: ${{ vars.SERVERPILOT_API_URL }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          echo "::add-mask::${EMBEDDED_PW:-}"
+          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          EFFECTIVE_USER="$SSH_USER"
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          pw_ok() {
+            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
+              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          }
+          # Retry the embedded probe a few times: a single transient SSH throttle
+          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
+          # 10s connect blip) must not flip us into the vault-fallback path when
+          # the embedded password is actually fine.
+          pw_ok_retry() {
+            for _i in 1 2 3; do
+              pw_ok "$1" && return 0
+              sleep 3
+            done
+            return 1
+          }
+          emit() {
+            echo "::add-mask::$1"
+            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
+          }
+          # 1) embedded password from DEPLOYMENT_CONFIG
+          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
+            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
+          fi
+          # 2) embedded missing/stale — pull the current password from the vault
+          if [ -z "${DEPLOY_TOKEN:-}" ]; then
+            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
+            emit "${EMBEDDED_PW:-}"; exit 0
+          fi
+          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
+          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+            -H "Authorization: Bearer $DEPLOY_TOKEN" \
+            -H "Content-Type: application/json" -H "Accept: application/json" \
+            -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
+          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
+            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
+            echo "::add-mask::$NEW_PW"
+            NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
+            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
+              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
+              EFFECTIVE_USER="$NEW_USER"
+            fi
+            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
+              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
+            fi
+            echo "::error::Vault password also failed for $HOST"; exit 1
+          else
+            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
+            if [ -n "${EMBEDDED_PW:-}" ]; then
+              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
+              emit "$EMBEDDED_PW"; exit 0
+            fi
+            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+          fi
+
+      - name: Runs before hooks
+        uses: appleboy/ssh-action@master
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_PATH: ${{ matrix.server.path }}/releases/${{ github.sha }}
+          ACTIVE_PATH: ${{ matrix.server.path }}/current
+          STORAGE_PATH: ${{ matrix.server.path }}/storage
+          BASE_PATH: ${{ matrix.server.path }}
+        with:
+          host: ${{ matrix.server.ip }}
+          username: ${{ steps.pw.outputs.username }}
+          password: ${{ steps.pw.outputs.password }}
+          port: ${{ matrix.server.port }}
+          envs: GITHUB_SHA, RELEASE_PATH, ACTIVE_PATH, STORAGE_PATH, BASE_PATH
+          script: |
+            ${{ matrix.server.beforeHooks }}
+
+  activate-release:
+    name: "${{ matrix.server.name }}: Activate release"
+    runs-on: self-hosted
+    needs:
+      [create-deployment-artifacts, prepare-release-on-server, run-before-hooks]
+    strategy:
+      matrix:
+        server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
+    steps:
+      - name: Resolve password (vault fallback if embedded password fails)
+        id: pw
+        env:
+          EMBEDDED_PW: ${{ matrix.server.password }}
+          HOST: ${{ matrix.server.ip }}
+          SSH_USER: ${{ matrix.server.username }}
+          SSH_PORT: ${{ matrix.server.port }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          SP_API: ${{ vars.SERVERPILOT_API_URL }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          echo "::add-mask::${EMBEDDED_PW:-}"
+          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          EFFECTIVE_USER="$SSH_USER"
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          pw_ok() {
+            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
+              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          }
+          # Retry the embedded probe a few times: a single transient SSH throttle
+          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
+          # 10s connect blip) must not flip us into the vault-fallback path when
+          # the embedded password is actually fine.
+          pw_ok_retry() {
+            for _i in 1 2 3; do
+              pw_ok "$1" && return 0
+              sleep 3
+            done
+            return 1
+          }
+          emit() {
+            echo "::add-mask::$1"
+            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
+          }
+          # 1) embedded password from DEPLOYMENT_CONFIG
+          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
+            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
+          fi
+          # 2) embedded missing/stale — pull the current password from the vault
+          if [ -z "${DEPLOY_TOKEN:-}" ]; then
+            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
+            emit "${EMBEDDED_PW:-}"; exit 0
+          fi
+          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
+          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+            -H "Authorization: Bearer $DEPLOY_TOKEN" \
+            -H "Content-Type: application/json" -H "Accept: application/json" \
+            -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
+          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
+            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
+            echo "::add-mask::$NEW_PW"
+            NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
+            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
+              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
+              EFFECTIVE_USER="$NEW_USER"
+            fi
+            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
+              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
+            fi
+            echo "::error::Vault password also failed for $HOST"; exit 1
+          else
+            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
+            if [ -n "${EMBEDDED_PW:-}" ]; then
+              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
+              emit "$EMBEDDED_PW"; exit 0
+            fi
+            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+          fi
+
+      - name: Activate release
+        uses: appleboy/ssh-action@master
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_PATH: ${{ matrix.server.path }}/releases/${{ github.sha }}
+          ACTIVE_RELEASE_PATH: ${{ matrix.server.path }}/current
+          STORAGE_PATH: ${{ matrix.server.path }}/storage
+          BASE_PATH: ${{ matrix.server.path }}
+          LARAVEL_ENV: ${{ secrets.LARAVEL_ENV }}
+          VIRTUAL_HOST_FILE_PATH: ${{ matrix.server.virtualHostFilePath }}
+          VIRTUAL_HOST_FILE: ${{ matrix.server.virtualHostFile }}
+          SERVER_NAME: ${{ matrix.server.serverName }}
+          SERVER_ALIAS: ${{ matrix.server.serverAlias }}
+          SERVER_ADMIN: ${{ matrix.server.serverAdmin }}
+          REFRESH_VIRTUAL_HOST: ${{ matrix.server.refreshVirtualHost }}
+          FPM_SOCKET: ${{ matrix.server.fpmSocket }}
+        with:
+          host: ${{ matrix.server.ip }}
+          username: ${{ steps.pw.outputs.username }}
+          password: ${{ steps.pw.outputs.password }}
+          port: ${{ matrix.server.port }}
+          envs: GITHUB_SHA, RELEASE_PATH, ACTIVE_RELEASE_PATH, STORAGE_PATH, BASE_PATH, LARAVEL_ENV, VIRTUAL_HOST_FILE_PATH, SERVER_NAME, SERVER_ALIAS, SERVER_ADMIN, REFRESH_VIRTUAL_HOST, VIRTUAL_HOST_FILE, FPM_SOCKET
+          script: |
+            # To copy the secret env created into the server
+            printf "%s" "$LARAVEL_ENV" > "$BASE_PATH/.env"
+
+            # To link the env into the release path
+            ln -s -f "$BASE_PATH/.env" $RELEASE_PATH
+
+            # To link the storage into the release path
+            ln -s -f $STORAGE_PATH $RELEASE_PATH
+
+            # To link the release path as the active release path
+            ln -s -n -f $RELEASE_PATH $ACTIVE_RELEASE_PATH
+
+            # Reload PHP-FPM to clear OPcache (prevents stale cached paths from old release)
+            sudo systemctl reload php8.3-fpm
+
+            # Load env vars from .env so we can reference DB_* in shell below
+            set -a
+            source "$BASE_PATH/.env"
+            set +a
+
+            # Database + user are provisioned manually on the server (not by this
+            # workflow). Ensure the DB exists and the app's DB_* credentials are
+            # valid before deploying — `php artisan migrate` below needs it.
+
+            # To config clear
+            cd $ACTIVE_RELEASE_PATH
+            php artisan config:clear
+            # --force is required: APP_ENV=production makes both commands prompt for
+            # confirmation, and with no TTY over SSH the prompt auto-cancels ("Command
+            # cancelled.") — the commands silently do nothing without it. Note that
+            # --no-interaction does NOT work here; it makes the prompt take its
+            # default, which is "no".
+            php artisan migrate --force
+            php artisan db:seed --force
+
+            PROC_NAME='%(program_name)s_%(process_num)02d'
+
+            # Setup Reverb supervisor if enabled
+            if [ "${SUPERVISOR_REVERB_ENABLED:-false}" = "true" ]; then
+              REVERB_CONF="${SUPERVISOR_REVERB_CONF_NAME:-signagesync-reverb}"
+              REVERB_PORT="${SUPERVISOR_REVERB_PORT:-6005}"
+              REVERB_HOST="${SUPERVISOR_REVERB_HOST:-0.0.0.0}"
+              REVERB_USER="${SUPERVISOR_REVERB_USER:-www-data}"
+              REVERB_NUMPROCS="${SUPERVISOR_REVERB_NUMPROCS:-1}"
+
+              printf "[program:%s]\nprocess_name=%s\ncommand=/usr/bin/php %s/artisan reverb:start --host=%s --port=%s\nautostart=true\nautorestart=true\nstopasgroup=true\nkillasgroup=true\nuser=%s\nnumprocs=%s\nredirect_stderr=true\nstdout_logfile=%s/logs/reverb.log\nstopwaitsecs=3600\n" "$REVERB_CONF" "$PROC_NAME" "$ACTIVE_RELEASE_PATH" "$REVERB_HOST" "$REVERB_PORT" "$REVERB_USER" "$REVERB_NUMPROCS" "$STORAGE_PATH" | sudo tee /etc/supervisor/conf.d/${REVERB_CONF}.conf > /dev/null
+              sudo supervisorctl reread
+              sudo supervisorctl update
+              sudo supervisorctl restart "${REVERB_CONF}:*"
+            fi
+
+            # Setup Queue supervisor if enabled
+            if [ "${SUPERVISOR_QUEUE_ENABLED:-false}" = "true" ]; then
+              QUEUE_CONF="${SUPERVISOR_QUEUE_CONF_NAME:-signagesync-queue}"
+              QUEUE_TRIES="${SUPERVISOR_QUEUE_TRIES:-3}"
+              QUEUE_USER="${SUPERVISOR_QUEUE_USER:-www-data}"
+              QUEUE_NUMPROCS="${SUPERVISOR_QUEUE_NUMPROCS:-1}"
+
+              printf "[program:%s]\nprocess_name=%s\ncommand=/usr/bin/php8.3 %s/artisan queue:work --tries=%s --timeout=60 --max-time=3600 --sleep=1\nautostart=true\nautorestart=true\nstopasgroup=true\nkillasgroup=true\nuser=%s\nnumprocs=%s\nredirect_stderr=true\nstdout_logfile=%s/logs/queue.log\n" "$QUEUE_CONF" "$PROC_NAME" "$ACTIVE_RELEASE_PATH" "$QUEUE_TRIES" "$QUEUE_USER" "$QUEUE_NUMPROCS" "$STORAGE_PATH" | sudo tee /etc/supervisor/conf.d/${QUEUE_CONF}.conf > /dev/null
+              sudo supervisorctl reread
+              sudo supervisorctl update
+              sudo supervisorctl restart "${QUEUE_CONF}:*"
+            fi
+
+            # Setup Uploads queue supervisor if enabled
+            if [ "${SUPERVISOR_UPLOADS_ENABLED:-false}" = "true" ]; then
+              UPLOADS_CONF="${SUPERVISOR_UPLOADS_CONF_NAME:-signagesync-uploads}"
+              UPLOADS_USER="${SUPERVISOR_UPLOADS_USER:-www-data}"
+              UPLOADS_NUMPROCS="${SUPERVISOR_UPLOADS_NUMPROCS:-1}"
+
+              printf "[program:%s]\nprocess_name=%s\ncommand=/usr/bin/php8.3 %s/artisan queue:work --queue=uploads,transcoding --tries=3 --timeout=1800 --max-time=3600 --sleep=3 --rest=1\nautostart=true\nautorestart=true\nstopasgroup=true\nkillasgroup=true\nuser=%s\nnumprocs=%s\nredirect_stderr=true\nstdout_logfile=%s/logs/uploads-queue.log\n" "$UPLOADS_CONF" "$PROC_NAME" "$ACTIVE_RELEASE_PATH" "$UPLOADS_USER" "$UPLOADS_NUMPROCS" "$STORAGE_PATH" | sudo tee /etc/supervisor/conf.d/${UPLOADS_CONF}.conf > /dev/null
+              sudo supervisorctl reread
+              sudo supervisorctl update
+              sudo supervisorctl restart "${UPLOADS_CONF}:*"
+            fi
+
+            # Restart queue workers to pick up new code
+            php artisan queue:restart
+            sudo supervisorctl restart laravel-worker:*
+
+            # This code is to generate the virtual host if it is not there
+            # FPM_SOCKET: deployment config > .env > default
+            FPM_SOCK="${FPM_SOCKET:-${VHOST_FPM_SOCKET:-/run/php/php8.3-fpm.sock}}"
+            # REFRESH_VIRTUAL_HOST: deployment config > .env
+            REFRESH="${REFRESH_VIRTUAL_HOST:-${VHOST_REFRESH:-false}}"
+            if [ ! -e $VIRTUAL_HOST_FILE_PATH/$VIRTUAL_HOST_FILE ] || [ "$REFRESH" = "true" ]; then
+              VHOST="<VirtualHost *:80>
+                ServerAdmin $SERVER_ADMIN
+                ServerName $SERVER_NAME
+                $( [ -n "$SERVER_ALIAS" ] && echo "ServerAlias $SERVER_ALIAS" )
+                DocumentRoot $ACTIVE_RELEASE_PATH/public/
+                <Directory $ACTIVE_RELEASE_PATH/public>
+                  AllowOverride All
+                  <FilesMatch \.php$>
+                    SetHandler \"proxy:unix:${FPM_SOCK}|fcgi://localhost\"
+                  </FilesMatch>
+                </Directory>
+
+                ErrorLog \${APACHE_LOG_DIR}/error.log
+                CustomLog \${APACHE_LOG_DIR}/access.log combined"
+
+              # Add WebSocket proxy if Reverb is enabled
+              if [ "${SUPERVISOR_REVERB_ENABLED:-false}" = "true" ]; then
+                REVERB_PORT="${SUPERVISOR_REVERB_PORT:-6005}"
+                VHOST="$VHOST
+
+                ProxyPreserveHost On
+                ProxyPass /app ws://127.0.0.1:${REVERB_PORT}/app
+                ProxyPassReverse /app ws://127.0.0.1:${REVERB_PORT}/app"
+              fi
+
+              VHOST="$VHOST
+              </VirtualHost>"
+
+              # vhost lives in /etc/apache2/sites-available — root-owned, so write via
+              # sudo tee (covered by the deploy sudoers DEPLOY_TEE grant), not `>`.
+              echo "$VHOST" | sudo tee $VIRTUAL_HOST_FILE_PATH/$VIRTUAL_HOST_FILE > /dev/null
+
+              sudo a2ensite $VIRTUAL_HOST_FILE
+              sudo systemctl reload apache2
+            fi
+
+            # --- SSL: install a Let's Encrypt cert only if the site has none yet ---
+            # If no SSL -> install; if SSL already present -> skip.
+            # certbot must be pre-installed on the host (once, as root:
+            #   sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot).
+            SSL_CONF="$VIRTUAL_HOST_FILE_PATH/${VIRTUAL_HOST_FILE%.conf}-le-ssl.conf"
+            if [ -f "$SSL_CONF" ] && grep -q "SSLCertificateFile" "$SSL_CONF"; then
+              echo "SSL already present for $SERVER_NAME ($SSL_CONF) — skipping certbot."
+            elif ! command -v certbot >/dev/null 2>&1 && ! command -v /snap/bin/certbot >/dev/null 2>&1; then
+              echo "::error::certbot not installed on host — install once as root: 'sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot'"
+              exit 1
+            else
+              echo "No SSL cert for $SERVER_NAME — issuing one via certbot --apache."
+              # root (all servers except key-only 65.20.87.148) runs raw certbot; the
+              # non-root `deploy` user (65.20.87.148) uses the sp-certbot-issue wrapper.
+              if [ "$(id -un)" = "root" ]; then
+                sudo /snap/bin/certbot --apache -d "$SERVER_NAME" --redirect --non-interactive --agree-tos -m "$SERVER_ADMIN"
+              else
+                sudo sp-certbot-issue apache "$SERVER_NAME" "$SERVER_ADMIN" "$SERVER_ALIAS"
+              fi
+              if [ ! -f "$SSL_CONF" ] || ! grep -q "SSLCertificateFile" "$SSL_CONF"; then
+                echo "::error::Certbot ran but $SSL_CONF has no SSLCertificateFile"
+                exit 1
+              fi
+            fi
+
+  run-after-hooks:
+    name: "${{ matrix.server.name }}: After hook"
+    runs-on: self-hosted
+    needs:
+      [create-deployment-artifacts, prepare-release-on-server, activate-release]
+    strategy:
+      matrix:
+        server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
+    steps:
+      - name: Resolve password (vault fallback if embedded password fails)
+        id: pw
+        env:
+          EMBEDDED_PW: ${{ matrix.server.password }}
+          HOST: ${{ matrix.server.ip }}
+          SSH_USER: ${{ matrix.server.username }}
+          SSH_PORT: ${{ matrix.server.port }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          SP_API: ${{ vars.SERVERPILOT_API_URL }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          echo "::add-mask::${EMBEDDED_PW:-}"
+          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          EFFECTIVE_USER="$SSH_USER"
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          pw_ok() {
+            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
+              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          }
+          # Retry the embedded probe a few times: a single transient SSH throttle
+          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
+          # 10s connect blip) must not flip us into the vault-fallback path when
+          # the embedded password is actually fine.
+          pw_ok_retry() {
+            for _i in 1 2 3; do
+              pw_ok "$1" && return 0
+              sleep 3
+            done
+            return 1
+          }
+          emit() {
+            echo "::add-mask::$1"
+            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
+          }
+          # 1) embedded password from DEPLOYMENT_CONFIG
+          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
+            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
+          fi
+          # 2) embedded missing/stale — pull the current password from the vault
+          if [ -z "${DEPLOY_TOKEN:-}" ]; then
+            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
+            emit "${EMBEDDED_PW:-}"; exit 0
+          fi
+          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
+          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+            -H "Authorization: Bearer $DEPLOY_TOKEN" \
+            -H "Content-Type: application/json" -H "Accept: application/json" \
+            -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
+          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
+            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
+            echo "::add-mask::$NEW_PW"
+            NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
+            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
+              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
+              EFFECTIVE_USER="$NEW_USER"
+            fi
+            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
+              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
+            fi
+            echo "::error::Vault password also failed for $HOST"; exit 1
+          else
+            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
+            if [ -n "${EMBEDDED_PW:-}" ]; then
+              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
+              emit "$EMBEDDED_PW"; exit 0
+            fi
+            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+          fi
+
+      - name: Runs after hooks
+        uses: appleboy/ssh-action@master
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_PATH: ${{ matrix.server.path }}/releases/${{ github.sha }}
+          ACTIVE_PATH: ${{ matrix.server.path }}/current
+          STORAGE_PATH: ${{ matrix.server.path }}/storage
+          BASE_PATH: ${{ matrix.server.path }}
+        with:
+          host: ${{ matrix.server.ip }}
+          username: ${{ steps.pw.outputs.username }}
+          password: ${{ steps.pw.outputs.password }}
+          port: ${{ matrix.server.port }}
+          envs: GITHUB_SHA, RELEASE_PATH, ACTIVE_PATH, STORAGE_PATH, BASE_PATH
+          script: |
+            ${{ matrix.server.afterHooks }}
+
+  clean-up:
+    name: "${{ matrix.server.name }}: Clean up"
+    runs-on: self-hosted
+    needs:
+      [
+        create-deployment-artifacts,
+        prepare-release-on-server,
+        activate-release,
+        run-after-hooks,
+      ]
+    strategy:
+      matrix:
+        server: ${{ fromJson(needs.create-deployment-artifacts.outputs.DEPLOYMENT_MATRIX) }}
+    steps:
+      - name: Resolve password (vault fallback if embedded password fails)
+        id: pw
+        env:
+          EMBEDDED_PW: ${{ matrix.server.password }}
+          HOST: ${{ matrix.server.ip }}
+          SSH_USER: ${{ matrix.server.username }}
+          SSH_PORT: ${{ matrix.server.port }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          SP_API: ${{ vars.SERVERPILOT_API_URL }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          echo "::add-mask::${EMBEDDED_PW:-}"
+          command -v sshpass >/dev/null 2>&1 || { echo "::error::sshpass is not installed on the runner (apt-get install -y sshpass)"; exit 1; }
+          EFFECTIVE_USER="$SSH_USER"
+          API="${SP_API:-https://api.serverpilot.aaibuzz.com}"
+          pw_ok() {
+            SSHPASS="$1" sshpass -e ssh -o PubkeyAuthentication=no \
+              -o PreferredAuthentications=password -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=10 -p "${SSH_PORT:-22}" "${EFFECTIVE_USER}@${HOST}" true 2>/dev/null
+          }
+          # Retry the embedded probe a few times: a single transient SSH throttle
+          # (sshd MaxStartups / fail2ban after the burst of deploy logins, or a
+          # 10s connect blip) must not flip us into the vault-fallback path when
+          # the embedded password is actually fine.
+          pw_ok_retry() {
+            for _i in 1 2 3; do
+              pw_ok "$1" && return 0
+              sleep 3
+            done
+            return 1
+          }
+          emit() {
+            echo "::add-mask::$1"
+            echo "username=$EFFECTIVE_USER" >> "$GITHUB_OUTPUT"
+            { echo "password<<__SP_PW_EOF__"; echo "$1"; echo "__SP_PW_EOF__"; } >> "$GITHUB_OUTPUT"
+          }
+          # 1) embedded password from DEPLOYMENT_CONFIG
+          if [ -n "${EMBEDDED_PW:-}" ] && pw_ok_retry "$EMBEDDED_PW"; then
+            echo "Embedded password OK."; emit "$EMBEDDED_PW"; exit 0
+          fi
+          # 2) embedded missing/stale — pull the current password from the vault
+          if [ -z "${DEPLOY_TOKEN:-}" ]; then
+            echo "::warning::Embedded password failed and no DEPLOY_TOKEN set — cannot fall back to vault."
+            emit "${EMBEDDED_PW:-}"; exit 0
+          fi
+          echo "Embedded password failed — requesting current password from ServerPilot vault (host-local)."
+          HTTP_CODE="$(curl -s -L -o "$RUNNER_TEMP/sp_resolve.json" -w '%{http_code}' -X POST "$API/api/deploy/resolve-key" \
+            -H "Authorization: Bearer $DEPLOY_TOKEN" \
+            -H "Content-Type: application/json" -H "Accept: application/json" \
+            -d "{\"host\":\"$HOST\",\"repo\":\"${REPO:-}\"}")"
+          RESP="$(cat "$RUNNER_TEMP/sp_resolve.json" 2>/dev/null || true)"; rm -f "$RUNNER_TEMP/sp_resolve.json"
+          if [ "$(printf '%s' "$RESP" | jq -r '.data.type // empty')" = "password" ]; then
+            NEW_PW="$(printf '%s' "$RESP" | jq -r '.data.password // .data.key // empty')"
+            echo "::add-mask::$NEW_PW"
+            NEW_USER="$(printf '%s' "$RESP" | jq -r '.data.username // empty')"
+            if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$EFFECTIVE_USER" ]; then
+              echo "ServerPilot switched deploy user: '$EFFECTIVE_USER' -> '$NEW_USER'."
+              EFFECTIVE_USER="$NEW_USER"
+            fi
+            if [ -n "$NEW_PW" ] && pw_ok "$NEW_PW"; then
+              echo "Recovered via vault password (stored config healed server-side)."; emit "$NEW_PW"; exit 0
+            fi
+            echo "::error::Vault password also failed for $HOST"; exit 1
+          else
+            MSG="$(printf '%s' "$RESP" | jq -r '.sub_title // .message // "unknown error"')"
+            if [ -n "${EMBEDDED_PW:-}" ]; then
+              echo "::warning::Vault fallback unavailable for $HOST (HTTP ${HTTP_CODE:-?}): $MSG — falling back to the embedded password (the deploy action will surface the real SSH error if it is wrong)."
+              emit "$EMBEDDED_PW"; exit 0
+            fi
+            echo "::error::resolve-key did not return a password for $HOST (HTTP ${HTTP_CODE:-?}): $MSG"; exit 1
+          fi
+
+      - name: Runs clean up
+        uses: appleboy/ssh-action@master
+        env:
+          ARTIFACTS_PATH: ${{ matrix.server.path }}/artifacts
+          RELEASE_PATH: ${{ matrix.server.path }}/releases
+        with:
+          host: ${{ matrix.server.ip }}
+          username: ${{ steps.pw.outputs.username }}
+          password: ${{ steps.pw.outputs.password }}
+          port: ${{ matrix.server.port }}
+          envs: RELEASE_PATH, ARTIFACTS_PATH
+          script: |
+            cd $RELEASE_PATH && ls -t -1 | tail -n +2 | xargs rm -rf
+            cd $ARTIFACTS_PATH && ls -t -1 | tail -n +2 | xargs rm -rf
