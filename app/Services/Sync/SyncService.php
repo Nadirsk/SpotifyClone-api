@@ -468,24 +468,52 @@ final class SyncService
             return null;
         }
 
+        /*
+         | Language-scoped, like every tier in DeduplicationService::findAlbum().
+         | This method is what actually built the 26-track "M.S. Dhoni - The
+         | Untold Story" — a Telugu track naming that album fell past the two
+         | artist-scoped lookups into the unscoped core-title tier, which
+         | compares nothing but the title and so happily returned the Hindi
+         | row. See findAlbum()'s docblock for the whole account.
+         */
+        $language = $this->normalizer->resolveLanguage($data->language);
+
         $album = Album::query()
             ->where('slug', $slug)
             ->where('artist_id', $artist->getKey())
+            ->when(
+                $language !== null,
+                /*
+                 | Rows with no language still match: the column is nullable and
+                 | most of this catalog predates it being populated, so requiring
+                 | equality would split every one of them on the next sync.
+                 */
+                static fn ($query) => $query->where(static fn ($q) => $q
+                    ->whereNull('language_id')
+                    ->orWhere('language_id', $language->getKey())),
+            )
             ->first();
 
         if ($album !== null) {
             return $album;
         }
 
-        $album = $this->deduplicator->albumByCoreTitle($data->album, $artist)
-            ?? $this->deduplicator->albumByCoreTitleAnyArtist($data->album);
+        $album = $this->deduplicator->albumByCoreTitle($data->album, $artist, $data->language)
+            ?? $this->deduplicator->albumByCoreTitleAnyArtist($data->album, $data->language);
 
         if ($album !== null) {
             return $album;
         }
 
+        /*
+         | `language_id` set on creation, not left null. Without it the album
+         | this song just created is languageless, every guard above waves the
+         | next language through on the nullable-row allowance, and the merge
+         | reappears one release later.
+         */
         return Album::query()->create([
             'artist_id' => $artist->getKey(),
+            'language_id' => $language?->getKey(),
             'title' => trim($data->album),
             'slug' => $slug,
             'cover_image' => $data->image,

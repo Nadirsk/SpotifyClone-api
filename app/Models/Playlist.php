@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Enums\PlaylistSource;
 use App\Enums\PlaylistVisibility;
 use Database\Factories\PlaylistFactory;
 use Illuminate\Database\Eloquent\Builder;
@@ -24,6 +25,7 @@ class Playlist extends Model
     /** @var list<string> */
     protected $fillable = [
         'user_id',
+        'source',
         'title',
         'slug',
         'description',
@@ -36,6 +38,7 @@ class Playlist extends Model
     protected function casts(): array
     {
         return [
+            'source' => PlaylistSource::class,
             'visibility' => PlaylistVisibility::class,
             'is_collaborative' => 'boolean',
             'tracks_count' => 'integer',
@@ -43,10 +46,44 @@ class Playlist extends Model
         ];
     }
 
-    /** @return BelongsTo<User, $this> */
+    /**
+     * The owning user, or null for a provider-curated playlist.
+     *
+     * @return BelongsTo<User, $this>
+     */
     public function owner(): BelongsTo
     {
         return $this->belongsTo(User::class, 'user_id');
+    }
+
+    /** @return HasOne<ProviderPlaylistMapping, $this> */
+    public function providerMapping(): HasOne
+    {
+        return $this->hasOne(ProviderPlaylistMapping::class);
+    }
+
+    /**
+     * Only playlists people made. Every existing "user's playlists" query is
+     * already scoped by `user_id`, so this exists for the listings that are
+     * not — browse, search and anything counting playlists globally, all of
+     * which would otherwise start reporting JioSaavn's editorial catalog as
+     * user content.
+     *
+     * @param  Builder<Playlist>  $query
+     */
+    public function scopeUserCreated(Builder $query): void
+    {
+        $query->where('source', PlaylistSource::User);
+    }
+
+    /**
+     * Only playlists mirrored from a provider.
+     *
+     * @param  Builder<Playlist>  $query
+     */
+    public function scopeProviderCurated(Builder $query): void
+    {
+        $query->where('source', '!=', PlaylistSource::User);
     }
 
     /** @return HasMany<PlaylistTrack, $this> */

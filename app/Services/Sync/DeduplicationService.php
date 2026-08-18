@@ -14,6 +14,7 @@ use App\Models\ProviderAlbumMapping;
 use App\Models\ProviderArtistMapping;
 use App\Models\ProviderSongMapping;
 use App\Models\Song;
+use App\Support\LanguageNames;
 use Illuminate\Support\Str;
 
 /**
@@ -61,12 +62,51 @@ final class DeduplicationService
             ?? $this->artistByName($data->name);
     }
 
+    /**
+     * Every title-based tier below is scoped to the incoming language.
+     *
+     * A film soundtrack is released once per language, and JioSaavn publishes
+     * each as its own album under the *same* title — "M.S. Dhoni - The Untold
+     * Story" exists in Hindi, Telugu, Tamil and Marathi. Matching on title
+     * alone welded all four into one row: observed in this catalog as a single
+     * album carrying 26 tracks across te/ta/mr/hi, so opening the Hindi
+     * soundtrack listed Tamil songs. `albumByCoreTitleAnyArtist()` guaranteed
+     * it — that tier ignores the artist by design, leaving the title as the
+     * only thing it compared.
+     *
+     * The mapping tier is deliberately exempt: a provider ID we have synced
+     * before is authoritative about which row it means, and a language we
+     * mis-parsed must not be allowed to split a record we already identified.
+     */
     public function findAlbum(ProviderAlbumData $data, Provider $provider, ?Artist $artist = null): ?Album
     {
         return $this->albumByMapping($data, $provider)
             ?? $this->albumByTitleAndArtist($data, $artist)
-            ?? $this->albumByCoreTitle($data->title, $artist)
-            ?? $this->albumByCoreTitleAnyArtist($data->title);
+            ?? $this->albumByCoreTitle($data->title, $artist, $data->language)
+            ?? $this->albumByCoreTitleAnyArtist($data->title, $data->language);
+    }
+
+    /**
+     * Whether a candidate album may be the same release as something arriving
+     * in `$incoming`'s language.
+     *
+     * Only a *disagreement* between two known languages rejects. Either side
+     * being unknown allows the match, which is the conservative direction: this
+     * runs inside dedup, where a false split costs a duplicate row that a later
+     * merge can fix, and a false merge silently welds two real albums together —
+     * the mistake that produced the 26-track album above.
+     */
+    private function languageAgrees(?string $incoming, ?Album $album): bool
+    {
+        $want = LanguageNames::toCode($incoming);
+
+        if ($want === null || $album === null) {
+            return true;
+        }
+
+        $have = LanguageNames::toCode($album->language?->code);
+
+        return $have === null || $have === $want;
     }
 
     /*
@@ -193,7 +233,9 @@ final class DeduplicationService
             return null;
         }
 
-        return $query->first();
+        $album = $query->with('language')->first();
+
+        return $this->languageAgrees($data->language, $album) ? $album : null;
     }
 
     /*
@@ -240,7 +282,24 @@ final class DeduplicationService
 
         // Closest runtime wins when several of the artist's songs share a
         // core title (a title track and its reprise, for instance).
-        return $matches->sortBy(fn (Song $song): int => abs($song->duration - $data->duration))->first();
+        $closest = $matches->sortBy(fn (Song $song): int => abs($song->duration - $data->duration))->first();
+
+        /*
+         | ...but only if it is actually the same recording. Without this the
+         | tier matched on core title and artist alone, so every distinct cut
+         | an artist released under one name — radio edit, extended mix, live
+         | version, reprise — collapsed into whichever row was written first,
+         | and the runtimes that tell them apart were used only to rank the
+         | candidates, never to reject them.
+         |
+         | Same tolerance as `songByDuration()`, deliberately: the two tiers
+         | differ in how they match the *title* (core slug versus exact slug),
+         | and disagreeing about what counts as the same runtime would make
+         | which tier ran first decide whether two records merge.
+         */
+        $tolerance = max(0, (int) config('providers.dedupe.duration_tolerance_seconds', 3));
+
+        return abs($closest->duration - $data->duration) <= $tolerance ? $closest : null;
     }
 
     /**
@@ -250,7 +309,7 @@ final class DeduplicationService
      * lacks the qualifier the real synced album carries stubs a duplicate
      * instead of reusing it.
      */
-    public function albumByCoreTitle(string $title, ?Artist $artist): ?Album
+    public function albumByCoreTitle(string $title, ?Artist $artist, ?string $language = null): ?Album
     {
         if ($artist === null) {
             return null;
@@ -264,8 +323,10 @@ final class DeduplicationService
 
         return Album::query()
             ->where('artist_id', $artist->getKey())
+            ->with('language')
             ->get()
-            ->first(fn (Album $album): bool => $this->coreSlug((string) $album->title) === $core);
+            ->first(fn (Album $album): bool => $this->coreSlug((string) $album->title) === $core
+                && $this->languageAgrees($language, $album));
     }
 
     /**
@@ -287,7 +348,7 @@ final class DeduplicationService
      * the core title's longest word, then compares exactly among those.
      */
     /** Public: also used by `SyncService::resolveAlbumForSong()`, same reason as `albumByCoreTitle()`. */
-    public function albumByCoreTitleAnyArtist(string $title): ?Album
+    public function albumByCoreTitleAnyArtist(string $title, ?string $language = null): ?Album
     {
         $core = $this->coreSlug($title);
 
@@ -303,8 +364,10 @@ final class DeduplicationService
 
         return Album::query()
             ->whereRaw('MATCH(title) AGAINST (? IN BOOLEAN MODE)', ['+'.$keyword.'*'])
+            ->with('language')
             ->get()
-            ->first(fn (Album $album): bool => $this->coreSlug((string) $album->title) === $core);
+            ->first(fn (Album $album): bool => $this->coreSlug((string) $album->title) === $core
+                && $this->languageAgrees($language, $album));
     }
 
     /** The most distinctive (longest) hyphen-separated word in a slug. */

@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace App\Jobs;
 
 use App\Contracts\Providers\ProviderAdapter;
+use App\Contracts\Providers\SupportsCatalogCrawl;
+use App\Enums\CrawlType;
 use App\Exceptions\ProviderUnavailableException;
 use App\Models\Provider;
 use App\Services\Cache\CacheService;
 use App\Services\Providers\ProviderManager;
+use App\Services\Sync\CrawlFrontier;
 use App\Services\Sync\SyncService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -65,7 +68,7 @@ final class LazySyncSearchJob implements ShouldQueue
         return [10, 30, 60, 120];
     }
 
-    public function handle(ProviderManager $providers, SyncService $sync, CacheService $cache, LoggerInterface $logger): void
+    public function handle(ProviderManager $providers, SyncService $sync, CacheService $cache, CrawlFrontier $frontier, LoggerInterface $logger): void
     {
         $term = trim($this->term);
 
@@ -91,6 +94,33 @@ final class LazySyncSearchJob implements ShouldQueue
             $logger->debug('LazySyncSearchJob: no provider available, nothing to fetch', ['term' => $term]);
 
             return;
+        }
+
+        /*
+         | Hand the term to the crawl frontier before syncing a single record.
+         |
+         | What follows this is deliberately bounded — `lazy_search_limit` is 50
+         | because this job runs inline on somebody's search request and cannot
+         | be allowed to spend two minutes walking 125 pages while they wait.
+         | But 50 is not "all available results", and JioSaavn routinely reports
+         | thousands for an ordinary term. The frontier is where the rest goes:
+         | one idempotent insert here turns every term anyone searches into a
+         | `search_term` target, which fans out into the four per-type walks and
+         | is taken to the provider's own total by the background crawler. The
+         | searcher gets the fast bounded answer; the catalog gets everything,
+         | usually within the same minute.
+         |
+         | Before the sync rather than after, and outside the try/catch, because
+         | a provider that cuts us off mid-sync is exactly when the frontier
+         | matters most — the term is then queued to be retried in full later
+         | instead of being lost with the failed request.
+         */
+        if ($this->isWorthSeeding($term)) {
+            foreach ($adapters as $adapter) {
+                if ($adapter instanceof SupportsCatalogCrawl) {
+                    $frontier->enqueue($adapter->key(), CrawlType::SearchTerm, $term);
+                }
+            }
         }
 
         $limit = $this->limit ?? (int) config('providers.sync.lazy_search_limit', 10);
@@ -248,5 +278,33 @@ final class LazySyncSearchJob implements ShouldQueue
         }
 
         return $synced;
+    }
+
+    /**
+     * Whether this term is worth making a permanent crawl seed.
+     *
+     * Every searched term becomes a frontier target, which is what lets the
+     * catalog eventually hold all of a query's results when the inline path
+     * could only take 50. A type-ahead box, though, submits the prefixes too:
+     * one "KGF chapter" search left `K`, `KGF`, `KGF cha` and `KGF chapter`
+     * behind as four separate seeds, and crawling `K` walks a thousand
+     * essentially random records.
+     *
+     * That noise does not merely waste work — search targets sit at the FRONT
+     * of the priority order, so it gets crawled *ahead of* the real artist and
+     * album backlog queued behind it.
+     *
+     * Only length is checked, and the threshold is deliberately low: this
+     * catalog has genuinely short titles, which is the same reason the server
+     * runs `innodb_ft_min_token_size=1`, so anything stricter would start
+     * refusing real queries. Longer prefixes of the same phrase are left
+     * alone — they return real results, and the frontier's unique key already
+     * collapses exact repeats.
+     */
+    private function isWorthSeeding(string $term): bool
+    {
+        $minimum = max(1, (int) config('providers.crawl.min_seed_term_length', 3));
+
+        return mb_strlen($term) >= $minimum;
     }
 }

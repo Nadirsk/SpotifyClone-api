@@ -25,6 +25,15 @@ class Artist extends Model
         'image',
         'country',
         'popularity',
+        'follower_count',
+        'is_verified',
+        'dominant_type',
+        'dominant_language',
+        'birth_date',
+        'facebook_url',
+        'twitter_url',
+        'wiki_url',
+        'available_languages',
         'trending_score',
         'last_synced_at',
     ];
@@ -34,6 +43,9 @@ class Artist extends Model
     {
         return [
             'popularity' => 'integer',
+            'follower_count' => 'integer',
+            'is_verified' => 'boolean',
+            'available_languages' => 'array',
             'trending_score' => 'integer',
             'last_synced_at' => 'datetime',
         ];

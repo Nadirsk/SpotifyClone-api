@@ -35,8 +35,17 @@ final class BootstrapCatalog extends Command
 
     protected $description = 'Seed the catalog with real data from every enabled provider using a curated search-term list';
 
-    /** @var list<string> */
-    private const TERMS = [
+    /**
+     * Curated for this catalog Indian/regional focus.
+     *
+     * Public because `catalog:crawl --seed` reuses it: two independently
+     * maintained seed lists would drift, and then "what does a fresh install
+     * contain" would have two different answers depending on which command
+     * populated it.
+     *
+     * @var list<string>
+     */
+    public const TERMS = [
         'arijit singh',
         'bollywood hits',
         'romantic hindi songs',
@@ -180,13 +189,42 @@ final class BootstrapCatalog extends Command
      * that backfill queue too.
      *
      * @return list<ProviderArtistData>
+     *
+     * @throws ProviderUnavailableException when the provider itself is parked.
      */
     private function detailed(ProviderAdapter $adapter, string $term, int $limit): array
     {
         $detailed = [];
 
         foreach ($adapter->searchArtists($term, $limit) as $thin) {
-            $detailed[] = $adapter->getArtist($thin->externalId) ?? $thin;
+            try {
+                $detailed[] = $adapter->getArtist($thin->externalId) ?? $thin;
+            } catch (ProviderUnavailableException $exception) {
+                /*
+                 | A detail lookup that keeps failing is not proof the provider
+                 | is down — it is usually one poisoned record. The JioSaavn
+                 | wrapper 500s on artist 472373 because that artist's bio is
+                 | not the JSON the wrapper expects to parse, and it will do so
+                 | on every rerun forever. Letting that propagate abandoned the
+                 | 11 remaining search terms on every single run.
+                 |
+                 | `isAvailable()` is what separates the two cases. The breaker
+                 | counts *consecutive* failures, so a genuinely dead provider
+                 | fails every call, trips the circuit and is reported unavailable
+                 | here — rethrow, and the caller parks the run as before. One
+                 | bad record among working calls never trips it, so fall back to
+                 | the thin search result: a name and a photo, which is what this
+                 | artist would have had anyway, and `catalog:enrich-artists`
+                 | retries the bio later.
+                 */
+                if (! $adapter->isAvailable()) {
+                    throw $exception;
+                }
+
+                $this->warn("  skipped detail for '{$thin->name}' ({$thin->externalId}): {$exception->reason}");
+
+                $detailed[] = $thin;
+            }
         }
 
         return $detailed;

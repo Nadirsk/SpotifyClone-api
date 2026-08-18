@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Observers\SongObserver;
 use Database\Factories\SongFactory;
+use Illuminate\Database\Eloquent\Attributes\ObservedBy;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -13,6 +15,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
+#[ObservedBy(SongObserver::class)]
 class Song extends Model
 {
     /** @use HasFactory<SongFactory> */
@@ -38,6 +41,10 @@ class Song extends Model
         'play_count',
         'preview_url',
         'external_url',
+        'label',
+        'copyright',
+        'is_explicit',
+        'has_lyrics',
         'last_synced_at',
     ];
 
@@ -51,6 +58,8 @@ class Song extends Model
             'popularity' => 'integer',
             'trending_score' => 'integer',
             'play_count' => 'integer',
+            'is_explicit' => 'boolean',
+            'has_lyrics' => 'boolean',
             'last_synced_at' => 'datetime',
         ];
     }

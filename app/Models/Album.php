@@ -25,10 +25,12 @@ class Album extends Model
         // See Song::$fillable — parsed, never provider-supplied.
         'film_title',
         'slug',
+        'description',
         'cover_image',
         'release_date',
         'total_tracks',
         'popularity',
+        'is_explicit',
         'trending_score',
         'last_synced_at',
     ];
@@ -40,6 +42,7 @@ class Album extends Model
             'release_date' => 'date',
             'total_tracks' => 'integer',
             'popularity' => 'integer',
+            'is_explicit' => 'boolean',
             'trending_score' => 'integer',
             'last_synced_at' => 'datetime',
         ];

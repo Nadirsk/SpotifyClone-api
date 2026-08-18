@@ -102,12 +102,29 @@ final class EnrichArtists extends Command
 
                     $detail = $adapter->getArtist($match->externalId);
                 } catch (ProviderUnavailableException $exception) {
-                    // Availability was checked before this artist, so getting
-                    // here means the provider went away mid-backlog. Stop
-                    // rather than walk the remaining rows into a closed door.
-                    $this->warn("Paused: {$exception->reason} ({$adapter->key()}). Rerun later to continue.");
+                    /*
+                     | Availability was checked before this artist, so one of
+                     | two things happened: the provider went away mid-backlog,
+                     | or this single artist is a poisoned record. The JioSaavn
+                     | wrapper 500s permanently on some artists — their bio is
+                     | not the JSON it tries to parse — and treating that as
+                     | "the provider went away" abandoned the entire backlog on
+                     | the first such row, every run, enriching nobody.
+                     |
+                     | The breaker counts *consecutive* failures, so a provider
+                     | that is genuinely gone fails every call and reports itself
+                     | unavailable here; anything else is one bad row worth
+                     | stepping over.
+                     */
+                    if (! $adapter->isAvailable()) {
+                        $this->warn("Paused: {$exception->reason} ({$adapter->key()}). Rerun later to continue.");
 
-                    break 2;
+                        break 2;
+                    }
+
+                    $this->warn("  skipped: {$artist->name} ({$exception->reason} on {$adapter->key()})");
+
+                    continue;
                 }
 
                 if ($detail === null) {

@@ -122,6 +122,70 @@ class MetadataNormalizerTest extends TestCase
         $this->assertSame('https://listen.example.test/a', $attributes['external_url']);
     }
 
+    /**
+     * The whole `songs.track_number` column was null in a real catalog of ~2,000
+     * rows because the DTO carried no position and this method never wrote one.
+     * Both halves are asserted here: a supplied position reaches the column, and
+     * an absent one stays null rather than becoming 0 — `writeEntity()` drops
+     * nulls, and that is what stops a search-sourced re-sync (which cannot know
+     * the position) from wiping one an album tracklist had established.
+     */
+    public function test_song_attributes_maps_track_number_and_leaves_it_null_when_the_provider_gave_none(): void
+    {
+        $artist = Artist::factory()->create();
+
+        $fromTracklist = $this->normalizer->songAttributes(
+            new ProviderSongData(
+                provider: 'jiosaavn',
+                externalId: 'js-1',
+                title: 'Tum Hi Ho',
+                artist: $artist->name,
+                trackNumber: 1,
+            ),
+            $artist,
+            null,
+        );
+
+        $fromSearch = $this->normalizer->songAttributes(
+            new ProviderSongData(
+                provider: 'jiosaavn',
+                externalId: 'js-2',
+                title: 'Tum Hi Ho',
+                artist: $artist->name,
+            ),
+            $artist,
+            null,
+        );
+
+        $this->assertSame(1, $fromTracklist['track_number']);
+        $this->assertArrayHasKey('track_number', $fromSearch);
+        $this->assertNull($fromSearch['track_number']);
+    }
+
+    /**
+     * The checksum short-circuit in SyncService returns *before* the row is
+     * written, so a position that does not change the fingerprint can never be
+     * persisted onto a song already synced from a search. That is precisely how
+     * the column stayed empty, and it is a silent failure — the sync reports
+     * success either way — so it is pinned here rather than left to inspection.
+     */
+    public function test_track_number_changes_the_checksum_so_a_tracklist_sync_is_not_skipped_as_unchanged(): void
+    {
+        $fields = [
+            'provider' => 'jiosaavn',
+            'externalId' => 'js-1',
+            'title' => 'Tum Hi Ho',
+            'artist' => 'Arijit Singh',
+        ];
+
+        $fromSearch = new ProviderSongData(...$fields);
+        $fromTracklist = new ProviderSongData(...$fields, trackNumber: 1);
+        $laterInTheAlbum = new ProviderSongData(...$fields, trackNumber: 7);
+
+        $this->assertNotSame($fromSearch->checksum(), $fromTracklist->checksum());
+        $this->assertNotSame($fromTracklist->checksum(), $laterInTheAlbum->checksum());
+    }
+
     public function test_song_attributes_clamps_negative_popularity_to_zero_and_passes_null_duration_through(): void
     {
         $artist = Artist::factory()->create();

@@ -199,6 +199,27 @@ final class SearchService
 
     private function shouldSyncFromProvider(SearchQuery $query): bool
     {
+        /*
+         | The opt-in gate, and it comes first because it is the cheapest check
+         | and the one that matters most.
+         |
+         | Every search used to qualify, which was correct reasoning about
+         | *repeated* searches and completely wrong about typing. A type-ahead
+         | field issues a search per keystroke pause, and each prefix — "a",
+         | "ar", "ari", "arij" — is a distinct term with its own debounce key,
+         | so the 15-minute debounce below never saw the same term twice and
+         | never suppressed anything. Typing one artist name cost five separate
+         | provider searches, roughly seventy-five outbound requests, to answer
+         | a question the user had not finished asking.
+         |
+         | Now the client says whether it means it. The results page sets
+         | `sync=1`; the suggestion dropdown does not, and is answered from the
+         | local catalog at zero provider cost.
+         */
+        if (! $query->sync) {
+            return false;
+        }
+
         if ($query->type !== null && in_array($query->type, self::LOCAL_ONLY_TYPES, true)) {
             return false;
         }

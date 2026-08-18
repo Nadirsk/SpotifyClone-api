@@ -34,6 +34,12 @@ final class SearchRequest extends FormRequest
             'page' => ['nullable', 'integer', 'min:1'],
             'limit' => ['nullable', 'integer', 'min:1', 'max:'.(int) config('music.pagination.max_limit')],
             'sort' => ['nullable', 'string', Rule::in(SortOrder::values())],
+            /*
+             | Opt-in permission to spend provider requests on this search.
+             | Absent or false means answer from the local catalog alone —
+             | see SearchQuery::$sync for why the default has to be "no".
+             */
+            'sync' => ['nullable', 'boolean'],
         ];
     }
 

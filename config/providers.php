@@ -192,6 +192,151 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Catalog Crawl
+    |--------------------------------------------------------------------------
+    |
+    | The discovery half of the sync engine. `sync` above keeps records we
+    | already have fresh; this finds the ones we do not have yet.
+    |
+    | JioSaavn exposes no "list everything" endpoint, so completeness is
+    | reached by transitive closure instead: a seed term surfaces artists,
+    | albums and playlists; each artist yields their full song and album
+    | pages; each album and playlist yields tracks; every artist credited on
+    | those tracks is queued in turn. Run long enough with an empty frontier
+    | as the stop condition, that reaches everything reachable.
+    |
+    | State lives in `catalog_crawl_targets` rather than in the queue payload,
+    | so a run is resumable: kill it at any point and the next tick continues
+    | from the exact page it stopped on.
+    |
+    */
+
+    'crawl' => [
+        /*
+         | Targets claimed per CrawlFrontierJob run. The job takes a lease on
+         | each one, so this is also the blast radius of a worker dying
+         | mid-run — those leases expire and the targets return to the queue.
+         */
+        'batch_size' => (int) env('CRAWL_BATCH_SIZE', 25),
+
+        /*
+         | How long a claimed target stays leased before another worker may
+         | take it. Must comfortably exceed the slowest single target: a
+         | prolific artist is hundreds of sequential pages (Arijit Singh:
+         | 4,580 songs at 10 per page), and reclaiming one mid-flight would
+         | have two workers crawling the same pages.
+         */
+        'lease_seconds' => (int) env('CRAWL_LEASE_SECONDS', 1_800),
+
+        /*
+         | Pages walked per target per visit, for the paged target types
+         | (artist songs, artist albums, playlist tracks). A target that hits
+         | this ceiling is rescheduled at its next page rather than finished,
+         | which is what keeps one 458-page artist from monopolising a worker
+         | while the rest of the frontier waits.
+         */
+        'pages_per_visit' => (int) env('CRAWL_PAGES_PER_VISIT', 40),
+
+        /*
+         | Consecutive failures before a target is parked as `failed` and stops
+         | being retried. Protects the frontier from a permanently 404ing ID
+         | cycling forever.
+         */
+        'max_attempts' => (int) env('CRAWL_MAX_ATTEMPTS', 5),
+
+        /*
+         | Completed targets are revisited after this long to pick up new
+         | releases — a new album on an artist, a new track on an editorial
+         | playlist. This is the "automatically fetched as they are added"
+         | half of the requirement, and it is why targets are marked
+         | `completed` with a timestamp rather than deleted.
+         */
+        'revisit_after_hours' => (int) env('CRAWL_REVISIT_AFTER_HOURS', 72),
+
+        /*
+         | Artists and playlists are revisited far more often than that, but
+         | only their first page — a new release lands at the top of both
+         | listings, so one cheap call per entity detects it. The full re-walk
+         | still happens on the slower cadence above.
+         */
+        'new_release_check_hours' => (int) env('CRAWL_NEW_RELEASE_CHECK_HOURS', 6),
+
+        /*
+         | Cap on how many artists one new-release sweep checks, so the sweep
+         | stays a bounded tick as the catalog grows into six figures. Ordered
+         | by popularity: an active artist ships new music far more often than
+         | a long-tail one, and gets checked correspondingly more often.
+         */
+        'new_release_batch' => (int) env('CRAWL_NEW_RELEASE_BATCH', 200),
+
+        /*
+         | Whether discovering a song should queue the artists credited on it.
+         | This is the recursive step that makes the crawl unbounded — turn it
+         | off to keep the frontier to whatever was explicitly seeded.
+         */
+        'expand_artists' => (bool) env('CRAWL_EXPAND_ARTISTS', true),
+
+        /*
+         | Whether to follow JioSaavn's "play next" stations out from songs
+         | already in the catalog (CrawlType::SongSuggestions).
+         |
+         | Off by default, and not because it is low value — it is the only
+         | discovery source here that is not derived from catalog structure, so
+         | it reaches long-tail records nothing else finds. It is off because
+         | it grows the frontier faster than any other source: every song
+         | yields ~20 more songs, each of which is another seed, so switching
+         | it on turns a converging crawl into one that effectively never
+         | drains. Enable it once the structural crawl has finished.
+         */
+        'expand_suggestions' => (bool) env('CRAWL_EXPAND_SUGGESTIONS', false),
+
+        // Songs requested per station probe when the above is enabled.
+        'suggestion_limit' => (int) env('CRAWL_SUGGESTION_LIMIT', 20),
+
+        /*
+         | Shortest search term LazySyncSearchJob will promote into the frontier.
+         |
+         | Every term anyone searches becomes a seed, which is what lets the
+         | catalog eventually hold all results for a query the inline path could
+         | only answer 50 of. The cost is that a type-ahead box promotes each
+         | keystroke's prefix as well — a single "KGF chapter" search left `K`,
+         | `KGF`, `KGF cha` and `KGF chapter` in the frontier, and crawling `K`
+         | walks a thousand essentially random records.
+         |
+         | That is not merely wasted work: search targets sit at the FRONT of
+         | the priority order (CrawlType::defaultPriority), so prefix noise is
+         | crawled ahead of the real artist and album backlog behind it.
+         |
+         | Three rather than something larger because this catalog's short words
+         | are real — the same reason innodb_ft_min_token_size is 1 on this
+         | server. It only excludes terms too short to seed anything useful.
+         */
+        'min_seed_term_length' => (int) env('CRAWL_MIN_SEED_TERM_LENGTH', 3),
+
+        /*
+         | Ceiling on results pulled per search term per type.
+         |
+         | This is the "search should return everything, not a limited number"
+         | requirement, expressed as a number. The provider reports totals in
+         | the thousands for broad terms ("tum hi ho": 2,524 songs), and the
+         | crawler walks pages until it has them all or hits this. It exists
+         | only so a single pathological term cannot become an unbounded walk;
+         | JioSaavnAdapter clamps to its own MAX_SEARCH_RESULTS regardless.
+         */
+        'search_result_cap' => (int) env('CRAWL_SEARCH_RESULT_CAP', 5_000),
+
+        /*
+         | Hard ceiling on pending frontier rows. Reaching it stops *enqueueing*
+         | (crawling continues, draining what is already queued), so an
+         | unbounded closure cannot fill the disk unattended. Null disables it.
+         */
+        'max_pending' => env('CRAWL_MAX_PENDING') === null
+            ? 5_000_000
+            : (int) env('CRAWL_MAX_PENDING'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Spotify — OAuth 2.0 client credentials
     |--------------------------------------------------------------------------
     */
@@ -278,45 +423,62 @@ return [
     | JioSaavn — no official public API; community JSON wrapper, no auth
     |--------------------------------------------------------------------------
     |
-    | JioSaavn does not publish a developer API. `base_url` points at a
-    | community-maintained wrapper by default; swap it for a self-hosted
-    | instance for anything beyond light development use.
+    | JioSaavn does not publish a developer API, so this talks to the
+    | community-maintained wrapper (sumitkolhe/jiosaavn-api), which is checked
+    | out and run locally at tools/jiosaavn-api — see that directory's
+    | node-server.mjs and the README's "Local provider wrapper" section.
     |
-    | That last sentence is operational, not aspirational. The public instance
-    | is a free-tier Cloudflare Worker whose *daily* request allowance is shared
-    | with everyone else pointing at it, and once that allowance is gone every
-    | endpoint answers `429` with a plain-text `error code: 1027` body and no
-    | `Retry-After`, until it resets at 00:00 UTC. Observed here on 2026-08-15:
-    | fine until 09:52 UTC, a wall from then on. No amount of client-side
-    | politeness earns quota back — the cooldown below only keeps the app fast
-    | while it is gone. Self-host the wrapper to actually fix it.
+    | Self-hosting is not a preference here, it is what makes a full catalog
+    | crawl possible at all. The shared public instance (saavn.sumit.co) is a
+    | free-tier Cloudflare Worker whose *daily* request allowance is pooled
+    | across everyone pointing at it; once it is gone every endpoint answers
+    | `429` with a plain-text `error code: 1027` body and no `Retry-After`
+    | until 00:00 UTC. Observed here on 2026-08-15: fine until 09:52 UTC, a
+    | wall from then on. A crawl of this catalog is millions of requests, which
+    | would exhaust that budget within minutes. The local wrapper still reads
+    | JioSaavn's own endpoints — it just does not share a quota with strangers.
+    |
+    | Set JIOSAAVN_BASE_URL to the public instance to fall back to it; nothing
+    | else needs to change, but drop the rate limits back to ~2/s if you do.
     |
     */
 
     'jiosaavn' => [
         'enabled' => (bool) env('JIOSAAVN_ENABLED', false),
-        // saavn.dev, the wrapper's own documented default, does not resolve
-        // (confirmed dead 2026-08-07); saavn.sumit.co is the author's live one.
-        'base_url' => env('JIOSAAVN_BASE_URL', 'https://saavn.sumit.co/api'),
+        'base_url' => env('JIOSAAVN_BASE_URL', 'http://127.0.0.1:3500/api'),
         'rate_limit' => [
             /*
-             | Undocumented and unofficial. Deliberately below the shared
-             | default: we are a guest on someone else's free tier, and the
-             | binding limit here is a daily budget rather than a per-second
-             | one, so bursting buys nothing and only risks Cloudflare's own
-             | burst protection on top.
+             | Sized for the local wrapper, where the only real limit is
+             | JioSaavn's own upstream latency (~240ms per call, measured) —
+             | there is no quota to protect and no shared tenant to be polite
+             | to. The ceiling still exists so a runaway crawl cannot saturate
+             | the box or make JioSaavn itself treat us as abusive.
+             |
+             | Against the public instance this must come back down to ~2/s;
+             | see the note above.
              */
-            'requests' => (int) env('JIOSAAVN_RATE_LIMIT_REQUESTS', 2),
+            'requests' => (int) env('JIOSAAVN_RATE_LIMIT_REQUESTS', 20),
             'per_seconds' => (int) env('JIOSAAVN_RATE_LIMIT_PER_SECONDS', 1),
 
             /*
-             | Starts higher and climbs further than the shared default because
-             | of that daily budget: when this provider says no, it usually
-             | means no for hours, and the escalation should reach a park worth
-             | having quickly instead of probing a wall all afternoon.
+             | Short compared to the shared default: a local wrapper that
+             | refuses is a wrapper that is restarting or momentarily wedged,
+             | which resolves in seconds — not a daily budget that is gone for
+             | hours. Parking the crawler for half an hour over a blip would
+             | cost far more than retrying soon does.
              */
-            'cooldown_ms' => 60_000,
-            'cooldown_max_ms' => 1_800_000,
+            'cooldown_ms' => (int) env('JIOSAAVN_COOLDOWN_MS', 5_000),
+            'cooldown_max_ms' => (int) env('JIOSAAVN_COOLDOWN_MAX_MS', 120_000),
+
+            /*
+             | The crawler runs in a queue worker, not inline on a user's
+             | request, so it can afford to wait for its slot rather than shed
+             | the call. The shared 2s default exists to keep a lazy search
+             | fast; applying it here would silently drop crawl pages whenever
+             | the frontier ran hot, leaving holes the run would report as
+             | complete.
+             */
+            'max_wait_ms' => (int) env('JIOSAAVN_MAX_WAIT_MS', 15_000),
         ],
     ],
 
