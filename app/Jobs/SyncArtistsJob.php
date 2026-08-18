@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
+use App\Exceptions\ProviderUnavailableException;
 use App\Models\ProviderArtistMapping;
 use App\Services\Providers\ProviderManager;
 use App\Services\Sync\SyncService;
@@ -48,7 +49,7 @@ final class SyncArtistsJob implements ShouldQueue
 
     public function handle(ProviderManager $providers, SyncService $sync, LoggerInterface $logger): void
     {
-        $adapters = $providers->enabled();
+        $adapters = $providers->available();
 
         if ($this->providerKey !== null) {
             $adapters = array_values(array_filter(
@@ -85,16 +86,28 @@ final class SyncArtistsJob implements ShouldQueue
 
             $synced = 0;
 
-            foreach ($mappings as $mapping) {
-                $data = $adapter->getArtist((string) $mapping->provider_artist_id);
+            try {
+                foreach ($mappings as $mapping) {
+                    $data = $adapter->getArtist((string) $mapping->provider_artist_id);
 
-                if ($data === null) {
-                    continue;
-                }
+                    if ($data === null) {
+                        continue;
+                    }
 
-                if ($sync->syncArtist($record, $data) !== null) {
-                    $synced++;
+                    if ($sync->syncArtist($record, $data) !== null) {
+                        $synced++;
+                    }
                 }
+            } catch (ProviderUnavailableException $exception) {
+                // Cut short, not failed — see SyncSongsJob for the reasoning.
+                // Unreached mappings keep their old `last_synced_at`, so the
+                // next scheduled run resumes from here.
+                $logger->warning('Incremental artist sync stopped: provider unavailable', array_merge(
+                    ['synced_before_stopping' => $synced],
+                    $exception->context(),
+                ));
+
+                continue;
             }
 
             $logger->info('Incremental artist sync finished', [

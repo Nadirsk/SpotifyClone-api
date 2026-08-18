@@ -8,6 +8,7 @@ use Database\Factories\ArtistFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
@@ -24,6 +25,15 @@ class Artist extends Model
         'image',
         'country',
         'popularity',
+        'follower_count',
+        'is_verified',
+        'dominant_type',
+        'dominant_language',
+        'birth_date',
+        'facebook_url',
+        'twitter_url',
+        'wiki_url',
+        'available_languages',
         'trending_score',
         'last_synced_at',
     ];
@@ -33,6 +43,9 @@ class Artist extends Model
     {
         return [
             'popularity' => 'integer',
+            'follower_count' => 'integer',
+            'is_verified' => 'boolean',
+            'available_languages' => 'array',
             'trending_score' => 'integer',
             'last_synced_at' => 'datetime',
         ];
@@ -48,6 +61,20 @@ class Artist extends Model
     public function songs(): HasMany
     {
         return $this->hasMany(Song::class);
+    }
+
+    /**
+     * The listeners following this artist.
+     *
+     * Added for `NotifyFollowersOfRelease`'s fan-out — the inverse direction
+     * (`User`'s followed artists) already existed via `ArtistFollowRepository`,
+     * but announcing a release needs to walk it this way round.
+     *
+     * @return BelongsToMany<User, $this>
+     */
+    public function followers(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'artist_follows')->withTimestamps();
     }
 
     /** @return HasMany<ProviderArtistMapping, $this> */

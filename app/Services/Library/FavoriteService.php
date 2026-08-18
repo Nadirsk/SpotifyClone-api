@@ -8,6 +8,7 @@ use App\Contracts\Repositories\FavoriteRepository;
 use App\Contracts\Repositories\SongRepository;
 use App\Models\Song;
 use App\Models\User;
+use App\Services\Cache\CacheService;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 
@@ -20,9 +21,17 @@ use Illuminate\Database\Eloquent\ModelNotFoundException;
  */
 final class FavoriteService
 {
+    /**
+     * The one limit `useRecommendations()` (frontend) ever actually requests —
+     * see `RecommendationService::songsFor()`'s cache key, which this has to
+     * match exactly to invalidate the right entry.
+     */
+    private const RECOMMENDATIONS_CACHE_LIMIT = 20;
+
     public function __construct(
         private readonly FavoriteRepository $favorites,
         private readonly SongRepository $songs,
+        private readonly CacheService $cache,
     ) {}
 
     /** @return LengthAwarePaginator<int, Song> */
@@ -40,7 +49,10 @@ final class FavoriteService
      */
     public function add(User $user, string $songId): bool
     {
-        return $this->favorites->add($user, $this->songs->findOrFail($songId));
+        $added = $this->favorites->add($user, $this->songs->findOrFail($songId));
+        $this->forgetRecommendations($user);
+
+        return $added;
     }
 
     /**
@@ -52,5 +64,18 @@ final class FavoriteService
     public function remove(User $user, string $songId): void
     {
         $this->favorites->remove($user, $this->songs->findOrFail($songId));
+        $this->forgetRecommendations($user);
+    }
+
+    /**
+     * `RecommendationService::songsFor()` seeds itself from the user's own
+     * favourites and caches the result for `music.cache.ttl.recommendations`
+     * (30 minutes) — without this, favouriting your first song would leave
+     * "Recommended for today" empty until that TTL happened to expire, since
+     * nothing else ever invalidated the earlier (correctly empty) result.
+     */
+    private function forgetRecommendations(User $user): void
+    {
+        $this->cache->forget('recommendations', "songs:{$user->getKey()}:" . self::RECOMMENDATIONS_CACHE_LIMIT);
     }
 }

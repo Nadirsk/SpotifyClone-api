@@ -11,6 +11,8 @@ use App\Models\Album;
 use App\Models\Artist;
 use App\Models\Genre;
 use App\Models\Language;
+use App\Services\Catalog\SoundtrackParser;
+use App\Support\LanguageNames;
 use Illuminate\Support\Str;
 
 /**
@@ -29,41 +31,9 @@ use Illuminate\Support\Str;
  */
 final class MetadataNormalizer
 {
-    /**
-     * ISO 639-2/3 codes to the 639-1 codes the `languages` table prefers.
-     * MusicBrainz reports three-letter codes; everything else that reaches us is
-     * either already two letters or an English language name.
-     *
-     * Only the languages the platform actually targets are listed. An unmapped
-     * code is stored as-is rather than dropped: a slightly odd code is more
-     * useful than no language at all, and the column is ten characters wide.
-     *
-     * @var array<string, string>
-     */
-    private const ISO_639_3_TO_1 = [
-        'eng' => 'en', 'spa' => 'es', 'fra' => 'fr', 'fre' => 'fr', 'deu' => 'de', 'ger' => 'de',
-        'ita' => 'it', 'por' => 'pt', 'nld' => 'nl', 'dut' => 'nl', 'rus' => 'ru', 'jpn' => 'ja',
-        'kor' => 'ko', 'zho' => 'zh', 'chi' => 'zh', 'ara' => 'ar', 'hin' => 'hi', 'ben' => 'bn',
-        'pan' => 'pa', 'urd' => 'ur', 'tam' => 'ta', 'tel' => 'te', 'mar' => 'mr', 'guj' => 'gu',
-        'kan' => 'kn', 'mal' => 'ml', 'tur' => 'tr', 'pol' => 'pl', 'swe' => 'sv', 'tha' => 'th',
-        'vie' => 'vi', 'ind' => 'id', 'heb' => 'he', 'ell' => 'el', 'gre' => 'el',
-    ];
-
-    /**
-     * English names to 639-1 codes, for providers that report a language by
-     * name instead of a code.
-     *
-     * @var array<string, string>
-     */
-    private const NAMES_TO_CODE = [
-        'english' => 'en', 'spanish' => 'es', 'french' => 'fr', 'german' => 'de', 'italian' => 'it',
-        'portuguese' => 'pt', 'dutch' => 'nl', 'russian' => 'ru', 'japanese' => 'ja', 'korean' => 'ko',
-        'chinese' => 'zh', 'mandarin' => 'zh', 'arabic' => 'ar', 'hindi' => 'hi', 'bengali' => 'bn',
-        'punjabi' => 'pa', 'urdu' => 'ur', 'tamil' => 'ta', 'telugu' => 'te', 'marathi' => 'mr',
-        'gujarati' => 'gu', 'kannada' => 'kn', 'malayalam' => 'ml', 'turkish' => 'tr', 'polish' => 'pl',
-        'swedish' => 'sv', 'thai' => 'th', 'vietnamese' => 'vi', 'indonesian' => 'id', 'hebrew' => 'he',
-        'greek' => 'el',
-    ];
+    public function __construct(
+        private readonly SoundtrackParser $soundtracks,
+    ) {}
 
     /**
      * Column values for a `songs` row.
@@ -81,6 +51,15 @@ final class MetadataNormalizer
             'genre_id' => $genre?->getKey(),
             'language_id' => $language?->getKey(),
             'title' => $this->trim($data->title),
+            /*
+             | Derived from the title, not supplied by any provider — see
+             | SoundtrackParser. Null for the ~90% of the catalog that is not
+             | film music, which SyncService::writeEntity() then drops, so a
+             | re-sync never clears a film title it simply failed to re-derive.
+             | The repair path for a genuinely-changed title is
+             | `catalog:parse-soundtracks --fresh`.
+             */
+            'film_title' => $this->soundtracks->filmFrom($data->title),
             'slug' => Str::slug($data->title),
             /*
              | Passed through as null, NOT coerced to 0: the column is NOT NULL
@@ -92,11 +71,32 @@ final class MetadataNormalizer
              | genuine, unusable value.
              */
             'duration' => $data->duration,
+            /*
+             | Null for anything reached by search rather than by an album's
+             | tracklist, which `SyncService::writeEntity()` then drops — so
+             | the position an album fetch established is never cleared by a
+             | later search that could not have known it.
+             */
+            'track_number' => $data->trackNumber,
             'isrc' => $this->isrc($data->isrc),
             'release_date' => $data->releaseDate,
             'popularity' => $this->clampPopularity($data->popularity),
+            /*
+             | The provider's own counter, kept alongside `popularity`, which is
+             | this same number rescaled to 0-100. Both earn their place:
+             | popularity sorts a listing cheaply but saturates at the head of
+             | the catalog, while this is the figure a track page shows.
+             |
+             | Nothing to do with the app's own play counting — `trending_score`
+             | is computed from local listening history and never from this.
+             */
+            'play_count' => $data->playCount,
             'preview_url' => $data->previewUrl,
             'external_url' => $data->externalUrl,
+            'label' => $data->label,
+            'copyright' => $data->copyright,
+            'is_explicit' => $data->explicit,
+            'has_lyrics' => $data->hasLyrics,
         ];
     }
 
@@ -114,6 +114,23 @@ final class MetadataNormalizer
             'image' => $data->image,
             'country' => $this->country($data->country),
             'popularity' => $this->clampPopularity($data->popularity),
+            // The unscaled figure behind `popularity`; see songAttributes()'s
+            // note on play_count for why both columns earn their place.
+            'follower_count' => $data->followerCount,
+            'is_verified' => $data->isVerified,
+            'dominant_type' => $data->dominantType,
+            'dominant_language' => $data->dominantLanguage,
+            'birth_date' => $data->birthDate,
+            'facebook_url' => $data->facebookUrl,
+            'twitter_url' => $data->twitterUrl,
+            'wiki_url' => $data->wikiUrl,
+            /*
+             | Written only when the provider actually listed some. An empty
+             | array is not null, so it would survive writeEntity()'s filter and
+             | overwrite a populated column on any sync from a thinner source —
+             | exactly the blanking that filter exists to prevent.
+             */
+            'available_languages' => $data->availableLanguages === [] ? null : $data->availableLanguages,
         ];
     }
 
@@ -130,11 +147,16 @@ final class MetadataNormalizer
             'artist_id' => $artist->getKey(),
             'language_id' => $language?->getKey(),
             'title' => $this->trim($data->title),
+            // An album title rarely carries the credit its tracks do;
+            // `catalog:parse-soundtracks` fills the rest in from the tracklist.
+            'film_title' => $this->soundtracks->filmFrom($data->title),
             'slug' => Str::slug($data->title),
             'cover_image' => $data->image,
             'release_date' => $data->releaseDate,
             'total_tracks' => $data->totalTracks,
             'popularity' => $this->clampPopularity($data->popularity),
+            'description' => $data->description,
+            'is_explicit' => $data->explicit,
         ];
     }
 
@@ -180,12 +202,10 @@ final class MetadataNormalizer
         }
 
         $normalized = mb_strtolower($value);
-        $code = self::NAMES_TO_CODE[$normalized]
-            ?? self::ISO_639_3_TO_1[$normalized]
-            ?? $normalized;
+        $code = LanguageNames::toCode($normalized);
 
         // Anything that is not a plausible code is not worth a lookup row.
-        if (! preg_match('/^[a-z]{2,10}$/', $code)) {
+        if ($code === null) {
             return null;
         }
 
@@ -231,9 +251,7 @@ final class MetadataNormalizer
     /** Reverse the code back to a display name where we know one. */
     private function languageName(string $code, string $original): string
     {
-        $name = array_search($code, self::NAMES_TO_CODE, true);
-
-        return is_string($name) ? Str::title($name) : Str::title($original);
+        return LanguageNames::nameFor($code, $original);
     }
 
     /**

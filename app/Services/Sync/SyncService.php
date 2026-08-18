@@ -7,6 +7,7 @@ namespace App\Services\Sync;
 use App\DTO\Providers\ProviderAlbumData;
 use App\DTO\Providers\ProviderArtistData;
 use App\DTO\Providers\ProviderSongData;
+use App\Jobs\NotifyFollowersOfRelease;
 use App\Models\Album;
 use App\Models\Artist;
 use App\Models\Provider;
@@ -218,6 +219,18 @@ final class SyncService
 
             $album = $this->deduplicator->findAlbum($data, $provider, $artist);
             $album = $this->writeEntity(Album::class, $album, $this->normalizer->albumAttributes($data, $artist));
+
+            /*
+             | Announce it to the artist's followers, but only the first time
+             | this album is ever written — `wasRecentlyCreated` is the only
+             | signal that separates a genuine new release from the same album
+             | arriving again through a second provider or a refresh. Dispatched
+             | after the transaction commits so a rolled-back sync cannot
+             | announce a release that does not exist.
+             */
+            if ($album->wasRecentlyCreated) {
+                NotifyFollowersOfRelease::dispatch($artist, $album)->afterCommit();
+            }
 
             $this->writeMapping(
                 ProviderAlbumMapping::class,
@@ -432,8 +445,16 @@ final class SyncService
      *
      * No mapping row is written for a stub: the song payload gives us the
      * album's title but not the provider's album ID, and a mapping without a
-     * trustworthy external ID would be a lie the next sync has to unpick. The
-     * album sync job fills in the real record and dedupe merges the two.
+     * trustworthy external ID would be a lie the next sync has to unpick.
+     *
+     * The exact-slug lookup runs first because it is the cheap, certain
+     * answer; the deduplicator's fuzzy core-title match runs before stubbing
+     * a new row because a song's own `album` string frequently lacks a
+     * qualifier the real synced album title carries ("Aashiqui 2" vs
+     * "Aashiqui 2 (Original Motion Picture Soundtrack)") — without this, that
+     * mismatch alone was the single biggest source of duplicate albums,
+     * stubbing a near-copy on nearly every song synced against an album that
+     * already exists under its fuller title.
      */
     private function resolveAlbumForSong(ProviderSongData $data, Artist $artist): ?Album
     {
@@ -447,17 +468,52 @@ final class SyncService
             return null;
         }
 
+        /*
+         | Language-scoped, like every tier in DeduplicationService::findAlbum().
+         | This method is what actually built the 26-track "M.S. Dhoni - The
+         | Untold Story" — a Telugu track naming that album fell past the two
+         | artist-scoped lookups into the unscoped core-title tier, which
+         | compares nothing but the title and so happily returned the Hindi
+         | row. See findAlbum()'s docblock for the whole account.
+         */
+        $language = $this->normalizer->resolveLanguage($data->language);
+
         $album = Album::query()
             ->where('slug', $slug)
             ->where('artist_id', $artist->getKey())
+            ->when(
+                $language !== null,
+                /*
+                 | Rows with no language still match: the column is nullable and
+                 | most of this catalog predates it being populated, so requiring
+                 | equality would split every one of them on the next sync.
+                 */
+                static fn ($query) => $query->where(static fn ($q) => $q
+                    ->whereNull('language_id')
+                    ->orWhere('language_id', $language->getKey())),
+            )
             ->first();
 
         if ($album !== null) {
             return $album;
         }
 
+        $album = $this->deduplicator->albumByCoreTitle($data->album, $artist, $data->language)
+            ?? $this->deduplicator->albumByCoreTitleAnyArtist($data->album, $data->language);
+
+        if ($album !== null) {
+            return $album;
+        }
+
+        /*
+         | `language_id` set on creation, not left null. Without it the album
+         | this song just created is languageless, every guard above waves the
+         | next language through on the nullable-row allowance, and the merge
+         | reappears one release later.
+         */
         return Album::query()->create([
             'artist_id' => $artist->getKey(),
+            'language_id' => $language?->getKey(),
             'title' => trim($data->album),
             'slug' => $slug,
             'cover_image' => $data->image,

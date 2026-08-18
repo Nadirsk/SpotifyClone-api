@@ -27,6 +27,7 @@ class DatabaseSeeder extends Seeder
             ProviderSeeder::class,
             CatalogSeeder::class,
             UserSeeder::class,
+            ConcertSeeder::class,
         ]);
     }
 }

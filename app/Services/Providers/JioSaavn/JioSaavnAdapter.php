@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace App\Services\Providers\JioSaavn;
 
+use App\Contracts\Providers\SupportsCatalogCrawl;
+use App\Contracts\Providers\SupportsPlaylists;
 use App\DTO\Providers\ProviderAlbumData;
 use App\DTO\Providers\ProviderArtistData;
+use App\DTO\Providers\ProviderPage;
+use App\DTO\Providers\ProviderPlaylistData;
 use App\DTO\Providers\ProviderSongData;
 use App\Services\Providers\AbstractProviderAdapter;
 
@@ -26,7 +30,7 @@ use App\Services\Providers\AbstractProviderAdapter;
  * - images and artist bio arrive as arrays of variants rather than a single
  *   URL/string, so the highest-quality entry is picked.
  */
-final class JioSaavnAdapter extends AbstractProviderAdapter
+final class JioSaavnAdapter extends AbstractProviderAdapter implements SupportsCatalogCrawl, SupportsPlaylists
 {
     /**
      * JioSaavn exposes `playCount` as an unbounded string rather than a
@@ -35,6 +39,65 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
      * that only genuinely viral tracks saturate the schema's 0–100 column.
      */
     private const PLAY_COUNT_CEILING = 50_000_000;
+
+    /**
+     * Only the rich `/artists/{id}` response (`getArtist()`) carries either
+     * field — `/search/artists` gives neither, so a search-sourced artist
+     * still resolves to null popularity here until a detail fetch enriches
+     * it. Arijit Singh, the catalog's most-followed artist observed while
+     * calibrating this, sits at ~105M; the ceiling is set above that so he
+     * does not himself saturate the scale.
+     */
+    private const FOLLOWER_COUNT_CEILING = 150_000_000;
+
+    /**
+     * Defensive ceiling on `search()`'s target result count — independent of
+     * whatever a caller's own config asks for (`providers.sync.lazy_search_limit`,
+     * `catalog:bootstrap --limit`), so a future config mistake cannot turn one
+     * search into an unbounded crawl.
+     *
+     * Raised from 200 to cover a term exhaustively: JioSaavn reports totals in
+     * the thousands for common queries ("tum hi ho": 2,524) and the crawler is
+     * explicitly asked to store every result rather than a first page of them.
+     * The inline search path does not get anywhere near this — it is bounded
+     * separately and much more tightly by `providers.sync.lazy_search_limit`
+     * (50, i.e. two pages), because that one runs synchronously inside a user's
+     * request. This ceiling only ever binds a background crawl.
+     */
+    private const MAX_SEARCH_RESULTS = 10_000;
+
+    /**
+     * What one search page actually holds, which is not what you asked for.
+     *
+     * Measured against the live wrapper: `limit=50`, `limit=100` and
+     * `limit=200` all return exactly 40 results for a term with thousands
+     * available. Requesting more per page does not work, so full coverage is
+     * reached by walking pages and nothing else.
+     */
+    private const SEARCH_PAGE_SIZE = 40;
+
+    /**
+     * What one artist-listing page holds. Ten, and no parameter changes it —
+     * `limit`, `songCount` and `count` were each tried against
+     * `/artists/{id}/songs` and all three returned 10. Arijit Singh's 4,580
+     * songs are therefore 458 sequential requests, which is why
+     * `providers.crawl.pages_per_visit` exists to spread one artist across
+     * several visits instead of pinning a worker to it.
+     */
+    private const ARTIST_PAGE_SIZE = 10;
+
+    /**
+     * Ceiling on IDs per `/songs?ids=` batch. The endpoint takes a
+     * comma-separated list; this keeps the URL well inside any proxy's limit
+     * while still collapsing 50 lookups into one request.
+     */
+    private const MAX_IDS_PER_BATCH = 50;
+
+    /**
+     * Tracks per playlist page. Requests for 200 and 500 both came back with
+     * 50, so this is the provider's ceiling rather than our own politeness.
+     */
+    private const PLAYLIST_PAGE_SIZE = 50;
 
     public function key(): string
     {
@@ -104,14 +167,436 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
         return is_array($data) ? $this->mapAlbum($data) : null;
     }
 
-    /** @return array<array-key, mixed>|null */
-    private function search(string $path, string $query, int $limit): ?array
+    /**
+     * An album's full tracklist, fetched directly.
+     *
+     * Not part of `ProviderAdapter` — no DTO in this codebase carries a track
+     * list alongside album metadata, `ProviderAlbumData` included, because
+     * that is genuinely how every *other* provider's API is shaped: a song
+     * search and an album search are separate calls with no overlap. JioSaavn
+     * is the exception — `/albums?id=` embeds every song's full real data in
+     * the same response `getAlbum()` already calls (`data.songs`). Without
+     * this, an album only ever gets the tracks that happen to also surface
+     * independently from one of the bootstrap's own song-search terms, which
+     * is how most synced albums ended up with zero tracks in practice.
+     *
+     * @return list<ProviderSongData>
+     */
+    public function albumTracks(string $externalId): array
     {
-        return $this->fetch($path, [
+        $payload = $this->fetch('/albums', ['id' => $externalId]);
+        $songs = $payload === null ? null : $this->dig($payload, 'data.songs');
+
+        if (! is_array($songs)) {
+            return [];
+        }
+
+        $mapped = [];
+
+        /*
+         | The tracklist's own order is the track number. JioSaavn ships no
+         | position field on a song object — not in `data.songs`, not in a
+         | search hit, not in `/songs/{id}` — so the sequence this endpoint
+         | returns them in is the only statement it makes about running order,
+         | and it is the same order the JioSaavn app itself displays.
+         |
+         | The position is the item's index in the payload, not a running count
+         | of the ones that mapped successfully. A track we cannot map — no id,
+         | no title — is still a track on the real album, so skipping its number
+         | is right and renumbering around it would shift every track after it
+         | out of step with the record itself.
+         */
+        $position = 0;
+
+        foreach ($songs as $item) {
+            $position++;
+
+            if (! is_array($item)) {
+                continue;
+            }
+
+            $song = $this->mapSong($item, $position);
+
+            if ($song !== null) {
+                $mapped[] = $song;
+            }
+        }
+
+        return $mapped;
+    }
+
+    /**
+     * Walks pages until $limit results are collected, the provider's own
+     * `total` is exhausted, or a page comes back empty — whichever happens
+     * first. $limit is the only bound: pass the provider's total (or simply a
+     * very large number, clamped to MAX_SEARCH_RESULTS) to take everything a
+     * term has.
+     *
+     * Deliberately does not stop just because a page returned fewer items
+     * than asked. That is not an edge case on this provider, it is the norm:
+     * every page caps at SEARCH_PAGE_SIZE (40) no matter what `limit` says,
+     * so treating a short page as the end would truncate all but the smallest
+     * result set at 40. `total` is the only reliable signal that nothing is
+     * left.
+     *
+     * The page loop is bounded by $limit rather than by a fixed page ceiling.
+     * A caller asking for 5,000 results has asked for 125 pages and gets them;
+     * the protection against that happening inside a user's request is that
+     * the inline path asks for 50 (`providers.sync.lazy_search_limit`), not a
+     * cap buried here that would silently cripple the crawler too.
+     *
+     * @return list<array<array-key, mixed>>
+     */
+    private function search(string $path, string $query, int $limit): array
+    {
+        $limit = max(1, min(self::MAX_SEARCH_RESULTS, $limit));
+        $collected = [];
+        $seen = [];
+        $exhaustedPages = 0;
+
+        /*
+         | One-based. Pages 0 and 1 return the identical 40 records — measured
+         | against the live wrapper for several terms — so a zero-based walk
+         | spends its first two requests fetching the same page twice. The
+         | playlist endpoint has the same off-by-one, already documented on
+         | `getPlaylist()`.
+         */
+        for ($page = 1; count($collected) < $limit; $page++) {
+            $payload = $this->fetch($path, [
+                'query' => $query,
+                'page' => $page,
+                'limit' => self::SEARCH_PAGE_SIZE,
+            ]);
+
+            if ($payload === null) {
+                break;
+            }
+
+            $items = $this->dig($payload, 'data.results');
+
+            if (! is_array($items) || $items === []) {
+                break;
+            }
+
+            $fresh = 0;
+
+            foreach ($items as $item) {
+                if (! is_array($item)) {
+                    continue;
+                }
+
+                $id = $this->str($this->dig($item, 'id'));
+
+                // Keep unidentifiable rows; the mapper rejects them anyway, and
+                // they must not be mistaken for duplicates and end the walk.
+                if ($id === null || ! isset($seen[$id])) {
+                    if ($id !== null) {
+                        $seen[$id] = true;
+                    }
+
+                    $collected[] = $item;
+                    $fresh++;
+                }
+            }
+
+            /*
+             | The real stop condition, and it is not the provider's `total`.
+             |
+             | JioSaavn's search total is a match count, not a paginable depth.
+             | "pritam" reports 5,473 songs and serves 1,038 distinct across a
+             | sequential walk, after which every further page repeats records
+             | already returned — forever, with no empty page and no change in
+             | the total. Paging to the reported figure therefore spends about
+             | three quarters of its requests re-fetching the same records and
+             | reports having stored five times what it actually stored.
+             |
+             | Exhaustion is instead detected the only way the provider allows:
+             | a page that contributes nothing new. Two in a row rather than one,
+             | because a single all-duplicate page happens legitimately mid-walk
+             | when the ranking shifts under a concurrent crawl.
+             |
+             | Everything past this ceiling is still reachable — through artist
+             | discographies, album tracklists and playlists, which are paged
+             | honestly. Search is a seed for those, not the road to completeness.
+             */
+            if ($fresh === 0) {
+                if (++$exhaustedPages >= 2) {
+                    break;
+                }
+
+                continue;
+            }
+
+            $exhaustedPages = 0;
+        }
+
+        return array_slice($collected, 0, $limit);
+    }
+
+    /**
+     * How many results this provider claims to have for a term, without
+     * collecting any of them.
+     *
+     * One cheap page-zero request that lets a caller ask for exactly the right
+     * number afterwards. `searchAll()` uses it so "store every result" does
+     * not have to mean "request MAX_SEARCH_RESULTS and hope" — a term with 12
+     * matches costs one page, not 250.
+     *
+     * @param  string  $type  `songs`, `albums`, `artists` or `playlists`.
+     */
+    public function searchTotal(string $type, string $query): ?int
+    {
+        $payload = $this->fetch('/search/'.$type, [
             'query' => $query,
             'page' => 0,
+            'limit' => 1,
+        ]);
+
+        return $payload === null ? null : $this->int($this->dig($payload, 'data.total'));
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Playlists (SupportsPlaylists)
+    |--------------------------------------------------------------------------
+    */
+
+    /** @return list<ProviderPlaylistData> */
+    public function searchPlaylists(string $query, int $limit): array
+    {
+        return $this->mapAll(
+            $this->search('/search/playlists', $query, $limit),
+            fn (array $item): ?ProviderPlaylistData => $this->mapPlaylist($item),
+        );
+    }
+
+    /**
+     * One playlist plus a page of its tracks.
+     *
+     * `$page` is zero-based to match every other paged call in this codebase,
+     * but JioSaavn's playlist endpoint is **one-based** and silently clamps:
+     * `page=0` and `page=1` return the identical first 50 tracks (verified
+     * against playlist 1167751266 — same five IDs both times, a different five
+     * at `page=2`). Passing a caller's zero straight through would re-sync page
+     * one forever and never reach track 51, so it is translated here rather
+     * than left as a trap for each caller to rediscover.
+     *
+     * `limit` is honoured up to PLAYLIST_PAGE_SIZE and ignored above it, so a
+     * 100-track playlist is two requests and no amount of asking makes it one.
+     */
+    public function getPlaylist(string $externalId, int $page = 0, int $limit = self::PLAYLIST_PAGE_SIZE): ?ProviderPlaylistData
+    {
+        $payload = $this->fetch('/playlists', [
+            'id' => $externalId,
+            'page' => max(0, $page) + 1,
+            'limit' => max(1, min(self::PLAYLIST_PAGE_SIZE, $limit)),
+        ]);
+
+        $data = $payload === null ? null : $this->dig($payload, 'data');
+
+        return is_array($data) ? $this->mapPlaylist($data) : null;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Discography crawl (SupportsCatalogCrawl)
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * One page of everything an artist is credited on.
+     *
+     * This is the endpoint that makes an exhaustive catalog possible: a search
+     * for "arijit singh" surfaces a few dozen of his tracks, while this
+     * reports 4,580 and will hand over every one of them.
+     *
+     * @return ProviderPage<ProviderSongData>
+     */
+    public function artistSongs(string $artistId, int $page = 0, bool $newestFirst = false): ProviderPage
+    {
+        return $this->artistPage(
+            path: '/artists/'.rawurlencode($artistId).'/songs',
+            collection: 'songs',
+            page: $page,
+            newestFirst: $newestFirst,
+            mapper: fn (array $item): ?ProviderSongData => $this->mapSong($item),
+        );
+    }
+
+    /**
+     * One page of an artist's albums.
+     *
+     * @return ProviderPage<ProviderAlbumData>
+     */
+    public function artistAlbums(string $artistId, int $page = 0, bool $newestFirst = false): ProviderPage
+    {
+        return $this->artistPage(
+            path: '/artists/'.rawurlencode($artistId).'/albums',
+            collection: 'albums',
+            page: $page,
+            newestFirst: $newestFirst,
+            mapper: fn (array $item): ?ProviderAlbumData => $this->mapAlbum($item),
+        );
+    }
+
+    /**
+     * Shared shape of the two artist listings: `{ data: { total, <collection>: [...] } }`.
+     *
+     * `sortBy=latest` needs `sortOrder=desc` to actually mean newest-first —
+     * with `asc` the same listing starts at 1999 and 2010 releases. Both are
+     * sent together or not at all, since the default (relevance/popularity)
+     * ordering is the right one for an exhaustive walk: it is stable across
+     * pages, whereas a date-sorted walk shifts under you every time the artist
+     * releases something mid-crawl.
+     *
+     * @template TValue
+     *
+     * @param  callable(array<array-key, mixed>): (TValue|null)  $mapper
+     * @return ProviderPage<TValue>
+     */
+    private function artistPage(
+        string $path,
+        string $collection,
+        int $page,
+        bool $newestFirst,
+        callable $mapper,
+    ): ProviderPage {
+        $query = ['page' => max(0, $page)];
+
+        if ($newestFirst) {
+            $query['sortBy'] = 'latest';
+            $query['sortOrder'] = 'desc';
+        }
+
+        $payload = $this->fetch($path, $query);
+
+        if ($payload === null) {
+            return ProviderPage::empty($page);
+        }
+
+        $items = $this->dig($payload, 'data.'.$collection);
+
+        return new ProviderPage(
+            items: is_array($items) ? $this->mapAll($items, $mapper) : [],
+            total: $this->int($this->dig($payload, 'data.total')),
+            page: $page,
+        );
+    }
+
+    /**
+     * What JioSaavn would play after this song.
+     *
+     * Backed by the station endpoint, so the seed must be a song ID the
+     * provider recognises as station-worthy; an unknown or non-playable ID
+     * answers `success: false` with a JavaScript TypeError as its message
+     * rather than an empty list. `fetch()` already treats that as "no record",
+     * so it surfaces here as an empty array.
+     *
+     * @return list<ProviderSongData>
+     */
+    public function songSuggestions(string $songId, int $limit = 20): array
+    {
+        $payload = $this->fetch('/songs/'.rawurlencode($songId).'/suggestions', [
             'limit' => max(1, min(50, $limit)),
         ]);
+
+        $data = $payload === null ? null : $this->dig($payload, 'data');
+
+        return is_array($data)
+            ? $this->mapAll($data, fn (array $item): ?ProviderSongData => $this->mapSong($item))
+            : [];
+    }
+
+    /**
+     * Fetch many songs per request instead of one.
+     *
+     * A crawl re-reads song IDs in bulk constantly — refreshing a playlist, a
+     * tracklist, a discography — and `/songs?ids=` collapses up to
+     * MAX_IDS_PER_BATCH of those into a single call. Chunked internally so
+     * callers can pass an arbitrarily long list.
+     *
+     * @param  list<string>  $externalIds
+     * @return list<ProviderSongData>
+     */
+    public function songsByIds(array $externalIds): array
+    {
+        $externalIds = array_values(array_unique(array_filter(
+            $externalIds,
+            static fn (string $id): bool => trim($id) !== '',
+        )));
+
+        $songs = [];
+
+        foreach (array_chunk($externalIds, self::MAX_IDS_PER_BATCH) as $chunk) {
+            $payload = $this->fetch('/songs', ['ids' => implode(',', $chunk)]);
+            $data = $payload === null ? null : $this->dig($payload, 'data');
+
+            if (! is_array($data)) {
+                continue;
+            }
+
+            foreach ($this->mapAll($data, fn (array $item): ?ProviderSongData => $this->mapSong($item)) as $song) {
+                $songs[] = $song;
+            }
+        }
+
+        return $songs;
+    }
+
+    /**
+     * The IDs an artist-detail response mentions in passing, for seeding the
+     * crawl frontier.
+     *
+     * `/artists/{id}` already carries `topSongs`, `topAlbums`, `singles` and
+     * `similarArtists` inline — up to 40 further entities named in a response
+     * the crawler fetched anyway. Harvesting them turns one artist lookup into
+     * dozens of new frontier targets at no extra request cost, which is most
+     * of what keeps an unbounded crawl fed.
+     *
+     * @return array{songs: list<string>, albums: list<string>, artists: list<string>}
+     */
+    public function artistRelatedIds(string $artistId): array
+    {
+        $payload = $this->fetch('/artists/'.rawurlencode($artistId));
+        $data = $payload === null ? null : $this->dig($payload, 'data');
+
+        if (! is_array($data)) {
+            return ['songs' => [], 'albums' => [], 'artists' => []];
+        }
+
+        return [
+            'songs' => $this->idsIn($data, 'topSongs'),
+            'albums' => array_values(array_unique(array_merge(
+                $this->idsIn($data, 'topAlbums'),
+                $this->idsIn($data, 'singles'),
+            ))),
+            'artists' => $this->idsIn($data, 'similarArtists'),
+        ];
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $data
+     * @return list<string>
+     */
+    private function idsIn(array $data, string $key): array
+    {
+        $entries = $this->dig($data, $key);
+
+        if (! is_array($entries)) {
+            return [];
+        }
+
+        $ids = [];
+
+        foreach ($entries as $entry) {
+            $id = is_array($entry) ? $this->str($this->dig($entry, 'id')) : null;
+
+            if ($id !== null) {
+                $ids[] = $id;
+            }
+        }
+
+        return array_values(array_unique($ids));
     }
 
     /**
@@ -145,18 +630,12 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
     /**
      * @template TValue
      *
-     * @param  array<array-key, mixed>|null  $payload
+     * @param  list<array<array-key, mixed>>  $items
      * @param  callable(array<array-key, mixed>): (TValue|null)  $mapper
      * @return list<TValue>
      */
-    private function mapAll(?array $payload, callable $mapper): array
+    private function mapAll(array $items, callable $mapper): array
     {
-        $items = $this->dig($payload ?? [], 'data.results', []);
-
-        if (! is_array($items)) {
-            return [];
-        }
-
         $mapped = [];
 
         foreach ($items as $item) {
@@ -174,11 +653,15 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
         return $mapped;
     }
 
-    /** @param array<array-key, mixed> $item */
-    private function mapSong(array $item): ?ProviderSongData
+    /**
+     * @param  array<array-key, mixed>  $item
+     * @param  int|null  $trackNumber  Supplied only by {@see albumTracks()}, which is the one caller
+     *                                 that knows the running order — see the comment there.
+     */
+    private function mapSong(array $item, ?int $trackNumber = null): ?ProviderSongData
     {
         $externalId = $this->str($this->dig($item, 'id'));
-        $title = $this->str($this->dig($item, 'name'));
+        $title = $this->decoded($this->dig($item, 'name'));
 
         if ($externalId === null || $title === null) {
             return null;
@@ -188,18 +671,28 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
             provider: $this->key(),
             externalId: $externalId,
             title: $title,
-            artist: $this->str($this->dig($item, 'artists.primary.0.name')),
-            album: $this->str($this->dig($item, 'album.name')),
+            artist: $this->primaryArtist($item),
+            album: $this->decoded($this->dig($item, 'album.name')),
             // Already seconds, like Deezer — no millisecond conversion needed.
             duration: $this->int($this->dig($item, 'duration')),
             genre: null,
             language: $this->str($this->dig($item, 'language')),
             releaseDate: $this->date($this->dig($item, 'releaseDate') ?? $this->dig($item, 'year')),
-            image: $this->image($this->dig($item, 'image')),
+            image: $this->bestVariant($this->dig($item, 'image')),
             popularity: $this->playCount($this->dig($item, 'playCount')),
             isrc: null,
-            previewUrl: null,
+            // Genuinely full-length — this wrapper reads JioSaavn's own CDN
+            // rather than a sanctioned preview endpoint. See the class docblock.
+            previewUrl: $this->bestVariant($this->dig($item, 'downloadUrl')),
             externalUrl: $this->str($this->dig($item, 'url')),
+            albumId: $this->str($this->dig($item, 'album.id')),
+            artistIds: $this->creditedArtistIds($item),
+            playCount: $this->int($this->dig($item, 'playCount')),
+            label: $this->decoded($this->dig($item, 'label')),
+            copyright: $this->decoded($this->dig($item, 'copyright')),
+            explicit: $this->bool($this->dig($item, 'explicitContent')),
+            hasLyrics: $this->bool($this->dig($item, 'hasLyrics')),
+            trackNumber: $trackNumber,
         );
     }
 
@@ -207,9 +700,9 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
     private function mapArtist(array $item): ?ProviderArtistData
     {
         $externalId = $this->str($this->dig($item, 'id'));
-        $name = $this->str($this->dig($item, 'name'));
+        $name = $this->decoded($this->dig($item, 'name'));
 
-        if ($externalId === null || $name === null) {
+        if ($externalId === null || $name === null || $this->looksLikeCreditLine($name)) {
             return null;
         }
 
@@ -218,12 +711,28 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
             externalId: $externalId,
             name: $name,
             genre: null,
-            image: $this->image($this->dig($item, 'image')),
-            bio: $this->str($this->dig($item, 'bio.0.text')),
+            image: $this->bestVariant($this->dig($item, 'image')),
+            bio: $this->decoded($this->dig($item, 'bio.0.text')),
             country: null,
-            // Exposed as follower/fan counts rather than a bounded score.
-            popularity: null,
+            popularity: $this->followerCount($item),
             externalUrl: $this->str($this->dig($item, 'url')),
+            /*
+             | The raw number this time, not the rescaled one, and `fanCount`
+             | is the fallback for the same reason `followerCount()` prefers it
+             | in reverse: the two fields are populated inconsistently per
+             | artist, and whichever is present is the real audience size.
+             */
+            followerCount: $this->int($this->dig($item, 'followerCount'))
+                ?? $this->int($this->dig($item, 'fanCount')),
+            isVerified: $this->bool($this->dig($item, 'isVerified')),
+            dominantLanguage: $this->str($this->dig($item, 'dominantLanguage')) ?: null,
+            dominantType: $this->str($this->dig($item, 'dominantType')) ?: null,
+            // Empty strings are this provider's "not set" across all four of these.
+            birthDate: $this->str($this->dig($item, 'dob')) ?: null,
+            facebookUrl: $this->str($this->dig($item, 'fb')) ?: null,
+            twitterUrl: $this->str($this->dig($item, 'twitter')) ?: null,
+            wikiUrl: $this->str($this->dig($item, 'wiki')) ?: null,
+            availableLanguages: $this->stringList($this->dig($item, 'availableLanguages')),
         );
     }
 
@@ -231,7 +740,7 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
     private function mapAlbum(array $item): ?ProviderAlbumData
     {
         $externalId = $this->str($this->dig($item, 'id'));
-        $title = $this->str($this->dig($item, 'name'));
+        $title = $this->decoded($this->dig($item, 'name'));
 
         if ($externalId === null || $title === null) {
             return null;
@@ -241,30 +750,308 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
             provider: $this->key(),
             externalId: $externalId,
             title: $title,
-            artist: $this->str($this->dig($item, 'artists.primary.0.name')),
+            artist: $this->primaryArtist($item),
             genre: null,
             language: $this->str($this->dig($item, 'language')),
             releaseDate: $this->date($this->dig($item, 'releaseDate') ?? $this->dig($item, 'year')),
-            image: $this->image($this->dig($item, 'image')),
+            image: $this->bestVariant($this->dig($item, 'image')),
             totalTracks: $this->int($this->dig($item, 'songCount')),
             popularity: $this->playCount($this->dig($item, 'playCount')),
             externalUrl: $this->str($this->dig($item, 'url')),
+            artistIds: $this->creditedArtistIds($item),
+            description: $this->decoded($this->dig($item, 'description')),
+            playCount: $this->int($this->dig($item, 'playCount')),
+            explicit: $this->bool($this->dig($item, 'explicitContent')),
         );
     }
 
     /**
-     * JioSaavn returns images as `[{quality: "50x50", url: "..."}, ...]`
-     * ordered smallest first; the last entry is the highest resolution.
+     * Maps both playlist shapes the provider returns: a `/search/playlists`
+     * hit (metadata only) and a `/playlists?id=` detail (metadata plus a page
+     * of real song records).
+     *
+     * The `songCount` handling is the load-bearing part, and it is not
+     * symmetric between the two:
+     *
+     * - On a **search hit** the field is the playlist's genuine track total
+     *   ("Bollywood Bappa": 21) and is kept.
+     * - On a **detail** response it is not a total at all — it mirrors however
+     *   many tracks that page happened to return. The same playlist reports
+     *   `songCount` 1, 5 and 20 for `limit` 1, 5 and 100. Storing that would
+     *   give every playlist a track count equal to the last page size fetched,
+     *   and any caller paging against it would stop after one page.
+     *
+     * A detail response is told apart by carrying a `songs` key at all, and
+     * has its count dropped to null. Callers page a playlist until a page
+     * comes back empty instead — see PlaylistSyncService.
      */
-    private function image(mixed $variants): ?string
+    private function mapPlaylist(array $item): ?ProviderPlaylistData
+    {
+        $externalId = $this->str($this->dig($item, 'id'));
+        $title = $this->decoded($this->dig($item, 'name'));
+
+        if ($externalId === null || $title === null) {
+            return null;
+        }
+
+        $rawSongs = $this->dig($item, 'songs');
+        $isDetail = is_array($rawSongs);
+
+        $songs = $isDetail
+            ? $this->mapAll($rawSongs, fn (array $song): ?ProviderSongData => $this->mapSong($song))
+            : [];
+
+        $description = $this->decoded($this->dig($item, 'description'));
+
+        return new ProviderPlaylistData(
+            provider: $this->key(),
+            externalId: $externalId,
+            title: $title,
+            // Editorial descriptions arrive padded with long runs of spaces
+            // and stray newlines from the CMS; collapse them to one clean line.
+            description: $description === null ? null : (preg_replace('/\s+/u', ' ', trim($description)) ?: null),
+            image: $this->bestVariant($this->dig($item, 'image')),
+            // An empty string is the provider's "not set" for playlists.
+            language: $this->str($this->dig($item, 'language')) ?: null,
+            songCount: $isDetail ? null : $this->int($this->dig($item, 'songCount')),
+            followerCount: $this->int($this->dig($item, 'followerCount')),
+            externalUrl: $this->str($this->dig($item, 'url')),
+            songs: $songs,
+        );
+    }
+
+    /**
+     * JioSaavn returns both images and audio bitrates as
+     * `[{quality: "50x50"|"320kbps", url: "..."}, ...]` ordered smallest/lowest
+     * first; the last entry is the best.
+     *
+     * Two distinct "no real photo" placeholders get filtered out here, both
+     * observed on `/artists/{id}` for a name that is not actually an artist
+     * (a search whose query happens to match a multi-artist credit line as if
+     * it were one person's name — see `looksLikeCreditLine()`):
+     *
+     * - `www.jiosaavn.com/_i/3.0/artist-default-*.png` — not on the
+     *   `saavncdn.com` CDN real artwork and audio always come from, so it is
+     *   already excluded by the domain check below.
+     * - `static.saavncdn.com/_i/share-image-*.png` — a generic site-wide
+     *   share/OG image, technically on a `saavncdn.com` subdomain so the
+     *   domain check alone does not catch it. Storing this as if it were the
+     *   artist's photo also crashed the frontend outright: next/image only
+     *   pre-approves specific hostnames, and `static.saavncdn.com` was never
+     *   one of them (real artwork only ever comes from `c.saavncdn.com`).
+     */
+    private function bestVariant(mixed $variants): ?string
     {
         if (! is_array($variants) || $variants === []) {
             return null;
         }
 
         $last = end($variants);
+        $url = is_array($last) ? $this->str($this->dig($last, 'url')) : null;
 
-        return is_array($last) ? $this->str($this->dig($last, 'url')) : null;
+        if ($url === null || ! str_contains($url, 'saavncdn.com') || str_contains($url, 'static.saavncdn.com')) {
+            return null;
+        }
+
+        return $url;
+    }
+
+    /**
+     * Every artist the provider credits on a song or album, by ID.
+     *
+     * `artists.all` rather than `artists.primary`: the point of collecting
+     * these is discovery, and the featured vocalist, the composer and the
+     * lyricist are each an artist with their own discography worth crawling.
+     * Narrowing to primary credits would make the closure miss exactly the
+     * collaborators that link one corner of the catalog to another.
+     *
+     * Names are not checked against {@see looksLikeCreditLine()} here the way
+     * {@see primaryArtist()} does, because that check exists to stop a bad
+     * *name* being written to a row. These are IDs, and an ID resolves to
+     * whatever the provider's own artist page says — the crawler fetches that
+     * page rather than trusting the credit string.
+     *
+     * @param  array<array-key, mixed>  $item
+     * @return list<string>
+     */
+    private function creditedArtistIds(array $item): array
+    {
+        $ids = [];
+
+        foreach (['artists.all.*.id', 'artists.primary.*.id', 'primaryArtistsId'] as $path) {
+            $found = $this->dig($item, $path);
+
+            if (is_string($found)) {
+                // `primaryArtistsId` is a comma-separated string on some shapes.
+                $found = explode(',', $found);
+            }
+
+            if (! is_array($found)) {
+                continue;
+            }
+
+            foreach ($found as $id) {
+                $id = $this->str($id);
+
+                if ($id !== null && trim($id) !== '') {
+                    $ids[trim($id)] = true;
+                }
+            }
+        }
+
+        return array_keys($ids);
+    }
+
+    /**
+     * The wrapper types some flags as real booleans (`explicitContent`) and
+     * others as the strings JioSaavn sent (`"true"`, `"0"`), so neither a cast
+     * nor a strict comparison is safe on its own.
+     *
+     * Null is preserved rather than defaulted to false: SyncService drops null
+     * attributes before writing, so "the provider did not say" leaves whatever
+     * a previous sync established, while a real `false` overwrites it.
+     */
+    private function bool(mixed $value): ?bool
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return filter_var($value, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function stringList(mixed $value): array
+    {
+        if (! is_array($value)) {
+            return [];
+        }
+
+        $strings = [];
+
+        foreach ($value as $entry) {
+            $entry = $this->str($entry);
+
+            if ($entry !== null && trim($entry) !== '') {
+                $strings[] = trim($entry);
+            }
+        }
+
+        return array_values(array_unique($strings));
+    }
+
+    /**
+     * JioSaavn's text fields arrive with literal HTML entities —
+     * `Tum Hi Ho (From &quot;Aashiqui 2&quot;)` — rather than the real
+     * characters. Decoded here, once, rather than at every caller downstream,
+     * since this is stored verbatim in `songs`/`albums`/`artists` and every
+     * consumer of that data should see real text.
+     */
+    private function decoded(mixed $value): ?string
+    {
+        $value = $this->str($value);
+
+        return $value === null ? null : html_entity_decode($value, ENT_QUOTES | ENT_HTML5);
+    }
+
+    /**
+     * `/search/artists` frequently answers with a whole production credit
+     * line rather than one artist — `"Sachin-Jigar|Arijit Singh"`,
+     * `"Javed - Mohsin, Arijit Singh & Shreya Ghoshal"`, even
+     * `"Arijit Singh Tarannum Malik Earl Edgar D Raja Hasan"` with no
+     * separator at all — because the same string partial-matches the query
+     * against several people credited on the same song at once. Genuine duo
+     * acts in this catalog are hyphenated ("Sachin-Jigar", "Salim-Sulaiman")
+     * and untouched by any of this; every observed `&`-joined result instead
+     * paired the query name with a different second name per hit, which is
+     * "two people credited on one track", not one act with a stable name —
+     * so any `&` is treated the same as a comma or pipe. The word-count
+     * check catches the residual case with no separator at all
+     * ("Arijit Singh Tarannum Malik Earl Edgar D Raja Hasan").
+     */
+    private function looksLikeCreditLine(string $name): bool
+    {
+        return str_contains($name, '|')
+            || str_contains($name, ',')
+            || str_contains($name, '&')
+            || count(preg_split('/\s+/', trim($name)) ?: []) > 6;
+    }
+
+    /**
+     * A song or album's primary-credited artist, skipping over any entry that
+     * is itself a credit line.
+     *
+     * Prefers whoever `artists.all` tags with `role: "singer"` over the first
+     * name in `artists.primary`: the same recording re-surfaces under several
+     * JioSaavn IDs (once per compilation album it was licensed into), and
+     * `artists.primary`'s own ordering is not consistent across those
+     * duplicates — one "Tum Hi Ho" listing puts the composer (Mithoon) first,
+     * another puts the singer (Arijit Singh) first, for the literal same
+     * track. That inconsistency used to resolve the two listings to two
+     * different local artists, which defeated every artist-scoped dedupe tier
+     * in `DeduplicationService` and produced duplicate songs. The `singer`
+     * role on `artists.all` named the same person on both listings.
+     */
+    private function primaryArtist(array $item): ?string
+    {
+        return $this->singerCredit($item) ?? $this->firstPrimaryArtist($item);
+    }
+
+    /** @param array<array-key, mixed> $item */
+    private function singerCredit(array $item): ?string
+    {
+        $all = $this->dig($item, 'artists.all');
+
+        if (! is_array($all)) {
+            return null;
+        }
+
+        foreach ($all as $entry) {
+            if (! is_array($entry) || $this->str($this->dig($entry, 'role')) !== 'singer') {
+                continue;
+            }
+
+            $name = $this->decoded($this->dig($entry, 'name'));
+
+            if ($name !== null && ! $this->looksLikeCreditLine($name)) {
+                return $name;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Fallback when no `singer`-tagged entry exists (instrumentals, or an
+     * album payload that carries no `artists.all` at all).
+     *
+     * `artists.primary.0.name` is not immune to the same quirk
+     * `looksLikeCreditLine()` exists for: at least one synced song carried
+     * "Sachin-Jigar|Arijit Singh" as a single `primary` array element, even
+     * though `/songs/{id}` for that same track lists "Sachin-Jigar" and
+     * "Arijit Singh" as two separate, clean entries. The clean names are
+     * usually still in the array — just not always first — so this scans
+     * for one instead of trusting index 0.
+     */
+    private function firstPrimaryArtist(array $item): ?string
+    {
+        $names = $this->dig($item, 'artists.primary.*.name');
+
+        if (! is_array($names)) {
+            return null;
+        }
+
+        foreach ($names as $name) {
+            $name = $this->decoded($name);
+
+            if ($name !== null && ! $this->looksLikeCreditLine($name)) {
+                return $name;
+            }
+        }
+
+        return null;
     }
 
     /** Rescale JioSaavn's unbounded `playCount` onto the schema's 0–100 popularity. */
@@ -273,5 +1060,17 @@ final class JioSaavnAdapter extends AbstractProviderAdapter
         $playCount = $this->int($playCount);
 
         return $playCount === null ? null : $this->popularity((int) round($playCount / self::PLAY_COUNT_CEILING * 100));
+    }
+
+    /**
+     * Rescale JioSaavn's unbounded `followerCount`/`fanCount` onto the
+     * schema's 0–100 popularity, preferring the larger, more consistently
+     * present `followerCount`.
+     */
+    private function followerCount(array $item): ?int
+    {
+        $followers = $this->int($this->dig($item, 'followerCount')) ?? $this->int($this->dig($item, 'fanCount'));
+
+        return $followers === null ? null : $this->popularity((int) round($followers / self::FOLLOWER_COUNT_CEILING * 100));
     }
 }

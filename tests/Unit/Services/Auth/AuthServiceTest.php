@@ -8,6 +8,8 @@ use App\Events\UserRegistered;
 use App\Models\User;
 use App\Repositories\EloquentUserRepository;
 use App\Services\Auth\AuthService;
+use App\Services\Auth\EmailLoginCodeService;
+use App\Services\Auth\OtpService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
@@ -36,7 +38,11 @@ final class AuthServiceTest extends TestCase
     {
         parent::setUp();
 
-        $this->service = new AuthService(new EloquentUserRepository);
+        $this->service = new AuthService(
+            new EloquentUserRepository,
+            app(OtpService::class),
+            app(EmailLoginCodeService::class),
+        );
     }
 
     public function test_register_persists_a_hashed_password_dispatches_an_event_and_returns_a_token(): void

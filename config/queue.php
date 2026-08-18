@@ -40,7 +40,27 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            /*
+             | Must exceed the longest-running job on this connection, which is
+             | CrawlFrontierJob (`$timeout = 1800`, and it genuinely takes ten
+             | minutes to walk a batch of 25 search targets).
+             |
+             | Laravel's stock 90 is a live bug here, not a tuning preference:
+             | `retry_after` is when the queue decides a reserved job must have
+             | died and hands it to someone else. At 90s a healthy ten-minute
+             | crawl is re-reserved roughly six times while it is still running,
+             | so a second worker starts a duplicate copy every 90 seconds, and
+             | `attempts` climbs until $tries is spent and a job that never
+             | failed is written to failed_jobs.
+             |
+             | The crawl frontier's own 30-minute target leases keep the
+             | duplicates from crawling the same pages, so the damage was
+             | wasted provider traffic rather than corrupted data — but nothing
+             | about that is a reason to leave the window shorter than the work.
+             | Kept just above the job timeout so a genuinely dead worker is
+             | still reclaimed promptly.
+             */
+            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 1_860),
             'after_commit' => false,
         ],
 

@@ -1,0 +1,667 @@
+{
+  "info": {
+    "_postman_id": "b3f1c0a2-7d4e-4a19-9c1e-6a2f5d8e4b70",
+    "name": "iTunes / Apple Music — Resonance catalog provider",
+    "description": "Every upstream call the web player's catalog adapter makes.\n\nThe adapter lives at `frontend/src/server/providers/itunes.ts`; each request here maps to one method on the `MusicProvider` interface, and the folder descriptions say which.\n\n**No authentication.** Apple's Search API is public and needs no key, which is the main reason it was chosen — see `frontend/README.md`.\n\n**Two things worth knowing before you use this:**\n\n1. The response `Content-Type` is `text/javascript`, not `application/json`. Postman still renders it as JSON, but a strict client that switches on content type will not.\n2. There are **no CORS headers** on the metadata API, which is why the app proxies it through its own `/api/music/*` routes rather than calling it from the browser. The *audio* CDN does send `Access-Control-Allow-Origin: *`, so playback works directly.\n\nRequests are chained: run the Search folder first and the lookups pick up the ids automatically via collection variables.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "itunes_base",
+      "value": "https://itunes.apple.com",
+      "type": "string",
+      "description": "Search and Lookup."
+    },
+    {
+      "key": "charts_base",
+      "value": "https://rss.marketingtools.apple.com/api/v2",
+      "type": "string",
+      "description": "The charts feed. Note the host: rss.applemarketingtools.com 301-redirects here, so use this one directly or your client must follow redirects."
+    },
+    {
+      "key": "app_base",
+      "value": "http://localhost:3000",
+      "type": "string",
+      "description": "The web player's own proxy routes, for comparing normalized output against the raw upstream."
+    },
+    {
+      "key": "country",
+      "value": "IN",
+      "type": "string",
+      "description": "ISO 3166-1 alpha-2 storefront. Matches MUSIC_COUNTRY in the app."
+    },
+    {
+      "key": "term",
+      "value": "arijit singh",
+      "type": "string",
+      "description": "The search term used across the Search folder."
+    },
+    {
+      "key": "limit",
+      "value": "25",
+      "type": "string"
+    },
+    {
+      "key": "album_id",
+      "value": "1440742982",
+      "type": "string",
+      "description": "A collectionId. Auto-populated by 'Search — albums'."
+    },
+    {
+      "key": "artist_id",
+      "value": "471751",
+      "type": "string",
+      "description": "An artistId. Auto-populated by 'Search — artists'."
+    },
+    {
+      "key": "track_ids",
+      "value": "1440742988",
+      "type": "string",
+      "description": "Comma-separated trackIds for the batch lookup. Auto-populated by 'Search — songs'."
+    },
+    {
+      "key": "podcast_id",
+      "value": "1494049895",
+      "type": "string",
+      "description": "A podcast collectionId. Auto-populated by 'Search — podcasts'."
+    },
+    {
+      "key": "preview_url",
+      "value": "",
+      "type": "string",
+      "description": "Auto-populated by 'Search — songs' so the audio request below can be run as-is."
+    },
+    {
+      "key": "feed_url",
+      "value": "",
+      "type": "string",
+      "description": "Auto-populated by 'Search — podcasts'."
+    }
+  ],
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Applies to every request in the collection.",
+          "pm.test('responded 200', function () {",
+          "    pm.response.to.have.status(200);",
+          "});",
+          "",
+          "// Apple serves JSON as text/javascript, so parse defensively rather than",
+          "// relying on pm.response.json() alone.",
+          "pm.test('body is parseable JSON', function () {",
+          "    JSON.parse(pm.response.text());",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Search",
+      "description": "Backs `provider.search()`.\n\nThe adapter fires five of these **in parallel** rather than one `entity=all` call. Apple's combined search returns a single ranked list dominated by whichever type matched best, so the Albums tab would routinely come back empty on a query that mostly matched songs.",
+      "item": [
+        {
+          "name": "Search — songs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/search?term={{term}}&media=music&entity=song&limit={{limit}}&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["search"],
+              "query": [
+                { "key": "term", "value": "{{term}}" },
+                { "key": "media", "value": "music" },
+                { "key": "entity", "value": "song" },
+                { "key": "limit", "value": "{{limit}}" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Fields the adapter reads: `trackId`, `trackName`, `artistId`, `artistName`, `collectionId`, `trackTimeMillis`, `trackExplicitness`, `previewUrl`, `trackViewUrl`, `artworkUrl100`.\n\n`previewUrl` is the **30-second clip** — the only audio Apple publishes. There is no full-length field.\n\n`artistName` bakes collaborators into one string (\"Atif Aslam & Pritam\") while `artistId` identifies only the first, which is why the adapter splits the string and gives the rest synthetic `name:`-prefixed ids."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.parse(pm.response.text());",
+                  "",
+                  "pm.test('returned songs', function () {",
+                  "    pm.expect(body.resultCount).to.be.above(0);",
+                  "});",
+                  "",
+                  "pm.test('songs carry a 30s preview', function () {",
+                  "    const withPreview = body.results.filter(r => r.previewUrl);",
+                  "    pm.expect(withPreview.length).to.be.above(0);",
+                  "});",
+                  "",
+                  "// Chain into the batch lookup and the audio request below.",
+                  "const ids = body.results.slice(0, 3).map(r => r.trackId).join(',');",
+                  "if (ids) pm.collectionVariables.set('track_ids', ids);",
+                  "",
+                  "const first = body.results.find(r => r.previewUrl);",
+                  "if (first) pm.collectionVariables.set('preview_url', first.previewUrl);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search — albums",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/search?term={{term}}&media=music&entity=album&limit={{limit}}&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["search"],
+              "query": [
+                { "key": "term", "value": "{{term}}" },
+                { "key": "media", "value": "music" },
+                { "key": "entity", "value": "album" },
+                { "key": "limit", "value": "{{limit}}" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Fields read: `collectionId`, `collectionName`, `collectionType`, `trackCount`, `releaseDate`, `copyright`, `primaryGenreName`, `artworkUrl100`.\n\nThe adapter derives album *kind* from the title suffix — Apple appends ` - Single` and ` - EP` — plus `collectionType` for compilations, because there is no explicit kind field.\n\n`artworkUrl100` ends `/100x100bb.jpg`; swapping the dimensions in the path is the documented way to get a larger render. The app requests 600x600."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.parse(pm.response.text());",
+                  "",
+                  "pm.test('returned albums', function () {",
+                  "    pm.expect(body.resultCount).to.be.above(0);",
+                  "});",
+                  "",
+                  "const first = body.results[0];",
+                  "if (first) {",
+                  "    pm.collectionVariables.set('album_id', String(first.collectionId));",
+                  "    if (first.artistId) pm.collectionVariables.set('artist_id', String(first.artistId));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search — artists",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/search?term={{term}}&media=music&entity=musicArtist&limit={{limit}}&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["search"],
+              "query": [
+                { "key": "term", "value": "{{term}}" },
+                { "key": "media", "value": "music" },
+                { "key": "entity", "value": "musicArtist" },
+                { "key": "limit", "value": "{{limit}}" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Fields read: `artistId`, `artistName`, `primaryGenreName`, `artistLinkUrl`.\n\n**Artist results carry no artwork and no biography.** That is why the app's artist pages fall back to a deterministic Unsplash photo, and why 'monthly listeners' is derived from a hash of the id rather than read from a field — no free provider publishes that metric, and randomising it would make the number change between the server render and hydration."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.parse(pm.response.text());",
+                  "const first = body.results[0];",
+                  "if (first) pm.collectionVariables.set('artist_id', String(first.artistId));",
+                  "",
+                  "pm.test('artist results have no artwork field', function () {",
+                  "    // Documents the gap the app works around rather than asserting a success.",
+                  "    pm.expect(body.results.every(r => !r.artworkUrl100 || r.wrapperType !== 'artist')).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search — podcasts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/search?term=crime&media=podcast&entity=podcast&limit={{limit}}&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["search"],
+              "query": [
+                { "key": "term", "value": "crime" },
+                { "key": "media", "value": "podcast" },
+                { "key": "entity", "value": "podcast" },
+                { "key": "limit", "value": "{{limit}}" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Fields read: `collectionId`, `collectionName`, `artistName` (the publisher), `feedUrl`, `artworkUrl100`.\n\n`feedUrl` matters most: **Apple returns shows but never their episodes**, so the RSS feed is the only source for those. See the 'Podcast RSS feed' request at the bottom."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.parse(pm.response.text());",
+                  "const first = body.results[0];",
+                  "",
+                  "if (first) {",
+                  "    pm.collectionVariables.set('podcast_id', String(first.collectionId));",
+                  "    if (first.feedUrl) pm.collectionVariables.set('feed_url', first.feedUrl);",
+                  "}",
+                  "",
+                  "pm.test('shows expose an RSS feed', function () {",
+                  "    pm.expect(body.results.filter(r => r.feedUrl).length).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search — podcast episodes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/search?term=crime&media=podcast&entity=podcastEpisode&limit={{limit}}&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["search"],
+              "query": [
+                { "key": "term", "value": "crime" },
+                { "key": "media", "value": "podcast" },
+                { "key": "entity", "value": "podcastEpisode" },
+                { "key": "limit", "value": "{{limit}}" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Search-result episodes have a real `trackId`, unlike feed-parsed ones which have no stable provider id and get a synthetic `<showId>-ep-<n>`.\n\nUnlike music, an episode's `previewUrl`/`episodeUrl` is the **whole episode**, not a clip."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Lookup",
+      "description": "Backs `provider.album()`, `albumTracks()`, `artist()`, `artistAlbums()`, `artistTopTracks()` and `tracks()`.\n\nOne endpoint, four shapes, distinguished by the `entity` parameter. The response always leads with the looked-up entity and follows with its children, already in disc/track order — the adapter filters on `wrapperType` to split them.",
+      "item": [
+        {
+          "name": "Album + its tracklist",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/lookup?id={{album_id}}&entity=song&limit=200&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["lookup"],
+              "query": [
+                { "key": "id", "value": "{{album_id}}" },
+                { "key": "entity", "value": "song" },
+                { "key": "limit", "value": "200" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "`results[0]` is the collection (`wrapperType: \"collection\"`); the rest are its tracks (`wrapperType: \"track\"`) **already in running order**, so the adapter's filter preserves it for free.\n\nThis one call backs the whole album page — which is why `/api/music/album/:id` returns the album and its tracks in a single response rather than splitting them across two routes."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.parse(pm.response.text());",
+                  "const tracks = body.results.filter(r => r.wrapperType === 'track');",
+                  "",
+                  "pm.test('leads with the collection', function () {",
+                  "    pm.expect(body.results[0].wrapperType).to.eql('collection');",
+                  "});",
+                  "",
+                  "pm.test('tracks come back in running order', function () {",
+                  "    const numbers = tracks.map(t => t.trackNumber).filter(Boolean);",
+                  "    const sorted = [...numbers].sort((a, b) => a - b);",
+                  "    pm.expect(numbers).to.eql(sorted);",
+                  "});",
+                  "",
+                  "console.log(`${tracks.length} tracks, ${tracks.filter(t => t.previewUrl).length} with previews`);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Artist (bare)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/lookup?id={{artist_id}}&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["lookup"],
+              "query": [
+                { "key": "id", "value": "{{artist_id}}" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Returns a single `wrapperType: \"artist\"` record — name, genre, and a link to their Apple Music page. Nothing else. No image, no bio, no follower or listener counts."
+          }
+        },
+        {
+          "name": "Artist → albums (discography)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/lookup?id={{artist_id}}&entity=album&limit=48&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["lookup"],
+              "query": [
+                { "key": "id", "value": "{{artist_id}}" },
+                { "key": "entity", "value": "album" },
+                { "key": "limit", "value": "48" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Backs the Discography section and `/artist/:id/discography/all`. The adapter sorts by `releaseDate` descending — Apple's own order is not chronological."
+          }
+        },
+        {
+          "name": "Artist → top songs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/lookup?id={{artist_id}}&entity=song&limit=20&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["lookup"],
+              "query": [
+                { "key": "id", "value": "{{artist_id}}" },
+                { "key": "entity", "value": "song" },
+                { "key": "limit", "value": "20" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Backs the artist page's 'Popular' list.\n\nApple returns these in its own relevance order and publishes **no play counts**, so the app shows no plays column on this list — inventing one would be fabricating data."
+          }
+        },
+        {
+          "name": "Batch tracks by id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/lookup?id={{track_ids}}&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["lookup"],
+              "query": [
+                { "key": "id", "value": "{{track_ids}}" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Comma-separated ids. Backs `provider.tracks()`, which rehydrates anything that stored only ids — Liked Songs, a user playlist, a restored queue.\n\n**Apple caps a lookup at 200 ids**, so the adapter chunks. It also re-sorts the response back into the order asked for, because Apple does not preserve it and the queue depends on it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.parse(pm.response.text());",
+                  "const asked = pm.collectionVariables.get('track_ids').split(',');",
+                  "",
+                  "pm.test('resolved every id', function () {",
+                  "    pm.expect(body.resultCount).to.eql(asked.length);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Podcast show by id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{itunes_base}}/lookup?id={{podcast_id}}&country={{country}}",
+              "host": ["{{itunes_base}}"],
+              "path": ["lookup"],
+              "query": [
+                { "key": "id", "value": "{{podcast_id}}" },
+                { "key": "country", "value": "{{country}}" }
+              ]
+            },
+            "description": "Backs `provider.show()`. Returns the show and its `feedUrl` — the episodes come from the feed, not from here."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.parse(pm.response.text());",
+                  "const show = body.results[0];",
+                  "if (show && show.feedUrl) pm.collectionVariables.set('feed_url', show.feedUrl);",
+                  "",
+                  "pm.test('no episodes in the response', function () {",
+                  "    // Documents why the adapter has to parse RSS at all.",
+                  "    pm.expect(body.resultCount).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Charts",
+      "description": "Backs `provider.chart()` and the home page's 'Top songs today' shelf.\n\nA different host and a different shape from the Search API — this is Apple's marketing RSS feed, not iTunes Search.",
+      "item": [
+        {
+          "name": "Top songs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{charts_base}}/in/music/most-played/20/songs.json",
+              "host": ["{{charts_base}}"],
+              "path": ["in", "music", "most-played", "20", "songs.json"]
+            },
+            "description": "**Lowercase country code** here, unlike the Search API which takes uppercase.\n\nThe old host `rss.applemarketingtools.com` returns a **301** to this one, so a client that does not follow redirects gets an empty body — that cost me a debugging cycle.\n\nThe feed carries ids and names but **no preview URLs**, so the adapter feeds the ids straight into the batch lookup above to get playable tracks."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.parse(pm.response.text());",
+                  "",
+                  "pm.test('feed has results', function () {",
+                  "    pm.expect(body.feed.results.length).to.be.above(0);",
+                  "});",
+                  "",
+                  "pm.test('chart entries carry no audio', function () {",
+                  "    pm.expect(body.feed.results.every(r => !r.previewUrl)).to.be.true;",
+                  "});",
+                  "",
+                  "// Chain: these ids are what the batch lookup resolves.",
+                  "const ids = body.feed.results.slice(0, 5).map(r => r.id).join(',');",
+                  "if (ids) pm.collectionVariables.set('track_ids', ids);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Top albums",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{charts_base}}/in/music/most-played/20/albums.json",
+              "host": ["{{charts_base}}"],
+              "path": ["in", "music", "most-played", "20", "albums.json"]
+            },
+            "description": "Same shape, but the ids are **collections**. A collection id looked up bare returns no track, so the adapter resolves each album's tracklist and takes its first track to build a playable list."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Media",
+      "description": "The two non-JSON requests. Neither goes through the app's proxy — both are fetched by the browser or the server directly.",
+      "item": [
+        {
+          "name": "Preview audio (30s clip)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Range", "value": "bytes=0-2000" }],
+            "url": { "raw": "{{preview_url}}", "host": ["{{preview_url}}"] },
+            "description": "Run 'Search — songs' first to populate `preview_url`.\n\nThis is **why Apple was chosen**. The response carries `Access-Control-Allow-Origin: *` and `Accept-Ranges: bytes`, so an `<audio>` element can play *and seek* it straight from the browser — no proxy, no re-streaming. The metadata API has no such headers.\n\n`Content-Type` is `audio/x-m4p` (AAC in an MP4 container). The `Range` header above demonstrates seek support; remove it to fetch the whole clip.\n\n**It is 30 seconds. There is no full-length URL** — Apple does not publish one. Full playback of a mainstream catalog requires an authenticated paying subscriber and the provider's own SDK."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('partial content — seeking is supported', function () {",
+                  "    pm.expect(pm.response.code).to.be.oneOf([200, 206]);",
+                  "});",
+                  "",
+                  "pm.test('CORS allows direct browser playback', function () {",
+                  "    pm.expect(pm.response.headers.get('Access-Control-Allow-Origin')).to.eql('*');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Podcast RSS feed",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "User-Agent", "value": "resonance-web-player/1.0" }],
+            "url": { "raw": "{{feed_url}}", "host": ["{{feed_url}}"] },
+            "description": "Run 'Search — podcasts' first to populate `feed_url`.\n\nThe **only** source of episodes. Returns XML on an arbitrary third-party host with no CORS headers, which is why it is fetched and parsed server-side.\n\nThe adapter parses it with regular expressions rather than an XML library on purpose: podcast feeds are famously malformed, a strict parser throws on perfectly ordinary ones, and only six fields per item are needed. Each `<item>` gives the title, description, `pubDate`, `itunes:duration` and an `<enclosure url>` — that enclosure is the **full episode audio**, not a clip."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. App proxy routes",
+      "description": "The web player's own endpoints, which wrap everything above and return **normalized** shapes.\n\nCompare these against the raw responses to see exactly what the adapter does: split artist credits into linkable refs, upgrade artwork to 600px, derive album kind, and drop provider-specific field names entirely.\n\nRequires `npm run dev` in `frontend/`.",
+      "item": [
+        {
+          "name": "GET /api/music/search",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{app_base}}/api/music/search?q={{term}}",
+              "host": ["{{app_base}}"],
+              "path": ["api", "music", "search"],
+              "query": [{ "key": "q", "value": "{{term}}" }]
+            },
+            "description": "One response containing `tracks`, `albums`, `artists`, `shows` and `episodes` — the five parallel upstream calls, merged. Every search tab reads this same cached response, which is why switching tabs is instant."
+          }
+        },
+        {
+          "name": "GET /api/music/album/:id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{app_base}}/api/music/album/{{album_id}}",
+              "host": ["{{app_base}}"],
+              "path": ["api", "music", "album", "{{album_id}}"]
+            },
+            "description": "`{ album, tracks }`. Note `album.artists` is an array of `{ id, name }` refs — Apple's single baked-together `artistName` string, split so each credit can be a link."
+          }
+        },
+        {
+          "name": "GET /api/music/artist/:id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{app_base}}/api/music/artist/{{artist_id}}",
+              "host": ["{{app_base}}"],
+              "path": ["api", "music", "artist", "{{artist_id}}"]
+            },
+            "description": "`{ artist, albums, topTracks }` — three upstream calls fetched in parallel and returned together, because the artist page renders all three above the fold."
+          }
+        },
+        {
+          "name": "GET /api/music/tracks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{app_base}}/api/music/tracks?ids={{track_ids}}",
+              "host": ["{{app_base}}"],
+              "path": ["api", "music", "tracks"],
+              "query": [{ "key": "ids", "value": "{{track_ids}}" }]
+            },
+            "description": "Returns tracks **in the order asked for**, unlike the upstream lookup. The queue depends on that."
+          }
+        },
+        {
+          "name": "GET /api/music/home",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{app_base}}/api/music/home",
+              "host": ["{{app_base}}"],
+              "path": ["api", "music", "home"]
+            },
+            "description": "The home page's shelves, already resolved into cards. One chart call plus six curated searches, in parallel.\n\nA failing shelf leaves a gap rather than taking the route down — with seven concurrent upstream calls, one flaky response would otherwise blank the whole home screen."
+          }
+        },
+        {
+          "name": "GET /api/music/chart",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{app_base}}/api/music/chart?kind=songs&limit=50",
+              "host": ["{{app_base}}"],
+              "path": ["api", "music", "chart"],
+              "query": [
+                { "key": "kind", "value": "songs" },
+                { "key": "limit", "value": "50" }
+              ]
+            },
+            "description": "Chart ids already resolved into playable tracks with preview URLs — the step the raw feed leaves to you."
+          }
+        },
+        {
+          "name": "GET /api/music/show/:id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{app_base}}/api/music/show/{{podcast_id}}",
+              "host": ["{{app_base}}"],
+              "path": ["api", "music", "show", "{{podcast_id}}"]
+            },
+            "description": "`{ show, episodes }` — the lookup plus the parsed RSS feed, in one response. Episode ids are synthetic (`<showId>-ep-<n>`) because RSS items carry no stable id; the episode page splits the show id back out of that to load itself."
+          }
+        }
+      ]
+    }
+  ]
+}

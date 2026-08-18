@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
+use App\Exceptions\ProviderUnavailableException;
 use App\Models\ProviderAlbumMapping;
 use App\Services\Providers\ProviderManager;
 use App\Services\Sync\SyncService;
@@ -48,7 +49,7 @@ final class SyncAlbumsJob implements ShouldQueue
 
     public function handle(ProviderManager $providers, SyncService $sync, LoggerInterface $logger): void
     {
-        $adapters = $providers->enabled();
+        $adapters = $providers->available();
 
         if ($this->providerKey !== null) {
             $adapters = array_values(array_filter(
@@ -85,16 +86,28 @@ final class SyncAlbumsJob implements ShouldQueue
 
             $synced = 0;
 
-            foreach ($mappings as $mapping) {
-                $data = $adapter->getAlbum((string) $mapping->provider_album_id);
+            try {
+                foreach ($mappings as $mapping) {
+                    $data = $adapter->getAlbum((string) $mapping->provider_album_id);
 
-                if ($data === null) {
-                    continue;
-                }
+                    if ($data === null) {
+                        continue;
+                    }
 
-                if ($sync->syncAlbum($record, $data) !== null) {
-                    $synced++;
+                    if ($sync->syncAlbum($record, $data) !== null) {
+                        $synced++;
+                    }
                 }
+            } catch (ProviderUnavailableException $exception) {
+                // Cut short, not failed — see SyncSongsJob for the reasoning.
+                // Unreached mappings keep their old `last_synced_at`, so the
+                // next scheduled run resumes from here.
+                $logger->warning('Incremental album sync stopped: provider unavailable', array_merge(
+                    ['synced_before_stopping' => $synced],
+                    $exception->context(),
+                ));
+
+                continue;
             }
 
             $logger->info('Incremental album sync finished', [

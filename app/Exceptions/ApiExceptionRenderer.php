@@ -99,6 +99,17 @@ final class ApiExceptionRenderer
             ];
         }
 
-        return response()->json($payload, $status);
+        /*
+         | Carry the exception's own headers through. Only `Retry-After` uses
+         | this today — set by ProviderUnavailableException and by Laravel's own
+         | throttle rejection — and dropping it would leave a client that has
+         | just been told "come back later" with no idea when, which in practice
+         | means retrying immediately and making it worse.
+         */
+        $headers = $e instanceof HttpExceptionInterface
+            ? array_intersect_key($e->getHeaders(), ['Retry-After' => true])
+            : [];
+
+        return response()->json($payload, $status, $headers);
     }
 }

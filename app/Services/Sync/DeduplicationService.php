@@ -14,6 +14,7 @@ use App\Models\ProviderAlbumMapping;
 use App\Models\ProviderArtistMapping;
 use App\Models\ProviderSongMapping;
 use App\Models\Song;
+use App\Support\LanguageNames;
 use Illuminate\Support\Str;
 
 /**
@@ -51,6 +52,7 @@ final class DeduplicationService
         return $this->songByIsrc($data)
             ?? $this->songByMapping($data, $provider)
             ?? $this->songByTitleArtistAlbum($data, $artist, $album)
+            ?? $this->songByCoreTitle($data, $artist)
             ?? $this->songByDuration($data, $artist);
     }
 
@@ -60,10 +62,51 @@ final class DeduplicationService
             ?? $this->artistByName($data->name);
     }
 
+    /**
+     * Every title-based tier below is scoped to the incoming language.
+     *
+     * A film soundtrack is released once per language, and JioSaavn publishes
+     * each as its own album under the *same* title — "M.S. Dhoni - The Untold
+     * Story" exists in Hindi, Telugu, Tamil and Marathi. Matching on title
+     * alone welded all four into one row: observed in this catalog as a single
+     * album carrying 26 tracks across te/ta/mr/hi, so opening the Hindi
+     * soundtrack listed Tamil songs. `albumByCoreTitleAnyArtist()` guaranteed
+     * it — that tier ignores the artist by design, leaving the title as the
+     * only thing it compared.
+     *
+     * The mapping tier is deliberately exempt: a provider ID we have synced
+     * before is authoritative about which row it means, and a language we
+     * mis-parsed must not be allowed to split a record we already identified.
+     */
     public function findAlbum(ProviderAlbumData $data, Provider $provider, ?Artist $artist = null): ?Album
     {
         return $this->albumByMapping($data, $provider)
-            ?? $this->albumByTitleAndArtist($data, $artist);
+            ?? $this->albumByTitleAndArtist($data, $artist)
+            ?? $this->albumByCoreTitle($data->title, $artist, $data->language)
+            ?? $this->albumByCoreTitleAnyArtist($data->title, $data->language);
+    }
+
+    /**
+     * Whether a candidate album may be the same release as something arriving
+     * in `$incoming`'s language.
+     *
+     * Only a *disagreement* between two known languages rejects. Either side
+     * being unknown allows the match, which is the conservative direction: this
+     * runs inside dedup, where a false split costs a duplicate row that a later
+     * merge can fix, and a false merge silently welds two real albums together —
+     * the mistake that produced the 26-track album above.
+     */
+    private function languageAgrees(?string $incoming, ?Album $album): bool
+    {
+        $want = LanguageNames::toCode($incoming);
+
+        if ($want === null || $album === null) {
+            return true;
+        }
+
+        $have = LanguageNames::toCode($album->language?->code);
+
+        return $have === null || $have === $want;
     }
 
     /*
@@ -190,7 +233,170 @@ final class DeduplicationService
             return null;
         }
 
-        return $query->first();
+        $album = $query->with('language')->first();
+
+        return $this->languageAgrees($data->language, $album) ? $album : null;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | 3b. Core title + artist
+    |--------------------------------------------------------------------------
+    |
+    | Neither JioSaavn nor iTunes supplies an ISRC (tier 1 never fires for
+    | either), so cross-provider title drift is otherwise the single biggest
+    | source of literal duplicate rows for the same recording: one provider's
+    | title carries a soundtrack/edition qualifier the other's does not —
+    | "Tum Hi Ho" vs "Tum Hi Ho (From \"Aashiqui 2\")", "Aashiqui 2" vs
+    | "Aashiqui 2 (Original Motion Picture Soundtrack)", "Bhediya" vs
+    | "Bhediya (Original Motion Picture Soundtrack) - EP". Tier 3's exact slug
+    | already missed these; this strips the qualifier and tries again, still
+    | scoped to one artist's own catalog so a short generic title ("Dil") does
+    | not collide with an unrelated song by someone else.
+    */
+
+    private function songByCoreTitle(ProviderSongData $data, ?Artist $artist): ?Song
+    {
+        if ($artist === null) {
+            return null;
+        }
+
+        $core = $this->coreSlug($data->title);
+
+        if ($core === '') {
+            return null;
+        }
+
+        $matches = Song::query()
+            ->where('artist_id', $artist->getKey())
+            ->get()
+            ->filter(fn (Song $song): bool => $this->coreSlug((string) $song->title) === $core);
+
+        if ($matches->isEmpty()) {
+            return null;
+        }
+
+        if ($data->duration === null || $data->duration <= 0) {
+            return $matches->first();
+        }
+
+        // Closest runtime wins when several of the artist's songs share a
+        // core title (a title track and its reprise, for instance).
+        $closest = $matches->sortBy(fn (Song $song): int => abs($song->duration - $data->duration))->first();
+
+        /*
+         | ...but only if it is actually the same recording. Without this the
+         | tier matched on core title and artist alone, so every distinct cut
+         | an artist released under one name — radio edit, extended mix, live
+         | version, reprise — collapsed into whichever row was written first,
+         | and the runtimes that tell them apart were used only to rank the
+         | candidates, never to reject them.
+         |
+         | Same tolerance as `songByDuration()`, deliberately: the two tiers
+         | differ in how they match the *title* (core slug versus exact slug),
+         | and disagreeing about what counts as the same runtime would make
+         | which tier ran first decide whether two records merge.
+         */
+        $tolerance = max(0, (int) config('providers.dedupe.duration_tolerance_seconds', 3));
+
+        return abs($closest->duration - $data->duration) <= $tolerance ? $closest : null;
+    }
+
+    /**
+     * Public: also used by `SyncService::resolveAlbumForSong()`, which
+     * creates an album stub from nothing but a song's own `album` string and
+     * needs the same fuzzy match — otherwise a song whose reported album name
+     * lacks the qualifier the real synced album carries stubs a duplicate
+     * instead of reusing it.
+     */
+    public function albumByCoreTitle(string $title, ?Artist $artist, ?string $language = null): ?Album
+    {
+        if ($artist === null) {
+            return null;
+        }
+
+        $core = $this->coreSlug($title);
+
+        if ($core === '') {
+            return null;
+        }
+
+        return Album::query()
+            ->where('artist_id', $artist->getKey())
+            ->with('language')
+            ->get()
+            ->first(fn (Album $album): bool => $this->coreSlug((string) $album->title) === $core
+                && $this->languageAgrees($language, $album));
+    }
+
+    /**
+     * Same core-title match, but not scoped to one artist — the last resort
+     * for a compilation ("Smash Hits 2013 - Top Bollywood Hits") that credits
+     * a different artist per track. This schema's `albums.artist_id` is a
+     * single NOT NULL foreign key with no "Various Artists" concept, so every
+     * artist-scoped tier above creates its own stub the first time a new
+     * artist's song names the same compilation — observed in production data
+     * splitting one real compilation into a dozen near-empty rows, one per
+     * distinct credited artist, before this tier existed.
+     *
+     * Two genuinely different real albums coincidentally sharing an exact
+     * normalized title is rare enough at full-album-title granularity (unlike
+     * a short song title — "Dil" alone would be far too dangerous to match
+     * this way) that the residual risk is worth it against the alternative.
+     * The match still runs through MySQL's own FULLTEXT index on `title`
+     * rather than loading the whole table — narrows to candidates containing
+     * the core title's longest word, then compares exactly among those.
+     */
+    /** Public: also used by `SyncService::resolveAlbumForSong()`, same reason as `albumByCoreTitle()`. */
+    public function albumByCoreTitleAnyArtist(string $title, ?string $language = null): ?Album
+    {
+        $core = $this->coreSlug($title);
+
+        if ($core === '') {
+            return null;
+        }
+
+        $keyword = $this->longestWord($core);
+
+        if ($keyword === null) {
+            return null;
+        }
+
+        return Album::query()
+            ->whereRaw('MATCH(title) AGAINST (? IN BOOLEAN MODE)', ['+'.$keyword.'*'])
+            ->with('language')
+            ->get()
+            ->first(fn (Album $album): bool => $this->coreSlug((string) $album->title) === $core
+                && $this->languageAgrees($language, $album));
+    }
+
+    /** The most distinctive (longest) hyphen-separated word in a slug. */
+    private function longestWord(string $slug): ?string
+    {
+        $words = array_filter(explode('-', $slug));
+
+        if ($words === []) {
+            return null;
+        }
+
+        usort($words, static fn (string $a, string $b): int => strlen($b) - strlen($a));
+
+        return $words[0];
+    }
+
+    /**
+     * Dedup-only normalization — never written to `title`/`slug`, which stay
+     * exactly what the provider sent for display. Strips the two qualifier
+     * patterns actually observed across this catalog's two providers: a
+     * trailing parenthetical/bracketed attribution, and a trailing
+     * " - Single"/" - EP"/" - Deluxe Edition" style suffix.
+     */
+    private function coreSlug(string $title): string
+    {
+        $stripped = preg_replace('/[\(\[][^\(\)\[\]]*[\)\]]/u', ' ', $title) ?? $title;
+        $stripped = preg_replace('/\s+-\s+(single|ep|deluxe edition|remastered|remaster)\b.*$/iu', '', $stripped) ?? $stripped;
+
+        return Str::slug(trim($stripped));
     }
 
     private function artistByName(string $name): ?Artist

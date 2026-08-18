@@ -7,8 +7,12 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\ForgotPasswordRequest;
 use App\Http\Requests\Auth\LoginRequest;
+use App\Http\Requests\Auth\LoginWithPhoneRequest;
 use App\Http\Requests\Auth\RegisterRequest;
+use App\Http\Requests\Auth\RegisterWithPhoneRequest;
 use App\Http\Requests\Auth\ResetPasswordRequest;
+use App\Http\Requests\Auth\SendEmailLoginCodeRequest;
+use App\Http\Requests\Auth\VerifyEmailLoginCodeRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\Auth\AuthService;
@@ -35,12 +39,50 @@ final class AuthController extends Controller
         return $this->respondCreated($this->tokenPayload($result), 'Registration successful');
     }
 
+    public function registerWithPhone(RegisterWithPhoneRequest $request): JsonResponse
+    {
+        $result = $this->auth->registerWithPhone($request->validated());
+
+        return $this->respondCreated($this->tokenPayload($result), 'Registration successful');
+    }
+
     public function login(LoginRequest $request): JsonResponse
     {
         $result = $this->auth->login(
             (string) $request->validated('email'),
             (string) $request->validated('password'),
             (string) $request->ip(),
+        );
+
+        return $this->respondSuccess($this->tokenPayload($result), 'Login successful');
+    }
+
+    public function loginWithPhone(LoginWithPhoneRequest $request): JsonResponse
+    {
+        $result = $this->auth->loginWithPhone((string) $request->validated('phone'));
+
+        return $this->respondSuccess($this->tokenPayload($result), 'Login successful');
+    }
+
+    /**
+     * Fixed response regardless of whether the address has an account —
+     * same anti-enumeration shape as `forgotPassword()` below.
+     */
+    public function sendEmailLoginCode(SendEmailLoginCodeRequest $request): JsonResponse
+    {
+        $this->auth->sendEmailLoginCode((string) $request->validated('email'));
+
+        return $this->respondSuccess(
+            null,
+            'If an account exists for that email, a login code has been sent.',
+        );
+    }
+
+    public function verifyEmailLoginCode(VerifyEmailLoginCodeRequest $request): JsonResponse
+    {
+        $result = $this->auth->loginWithEmailCode(
+            (string) $request->validated('email'),
+            (string) $request->validated('code'),
         );
 
         return $this->respondSuccess($this->tokenPayload($result), 'Login successful');

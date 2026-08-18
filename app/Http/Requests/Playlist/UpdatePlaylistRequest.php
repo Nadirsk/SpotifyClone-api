@@ -29,6 +29,7 @@ final class UpdatePlaylistRequest extends FormRequest
             'description' => ['sometimes', 'nullable', 'string', 'max:1000'],
             'visibility' => ['sometimes', 'required', 'string', Rule::in(PlaylistVisibility::values())],
             'cover_image' => ['sometimes', 'nullable', 'url'],
+            'is_collaborative' => ['sometimes', 'boolean'],
         ];
     }
 }

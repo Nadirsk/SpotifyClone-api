@@ -16,16 +16,29 @@ use Symfony\Component\HttpFoundation\Response;
  */
 trait ApiResponse
 {
+    /**
+     * @param  array<string, mixed>  $meta  Facts about the *answer* rather than
+     *                                      the data — currently whether it was served in a degraded state. Omitted
+     *                                      from the envelope entirely when empty, so a client that ignores it sees
+     *                                      exactly the shape it always saw.
+     */
     protected function respondSuccess(
         mixed $data = null,
         string $message = 'Request successful',
         int $status = Response::HTTP_OK,
+        array $meta = [],
     ): JsonResponse {
-        return response()->json([
+        $payload = [
             'success' => true,
             'message' => $message,
             'data' => $this->resolveData($data),
-        ], $status);
+        ];
+
+        if ($meta !== []) {
+            $payload['meta'] = $meta;
+        }
+
+        return response()->json($payload, $status);
     }
 
     protected function respondCreated(mixed $data = null, string $message = 'Created'): JsonResponse
@@ -63,15 +76,17 @@ trait ApiResponse
      *
      * @param  LengthAwarePaginator<int, mixed>  $paginator
      * @param  class-string<JsonResource>|null  $resource
+     * @param  array<string, mixed>  $meta  See respondSuccess().
      */
     protected function respondPaginated(
         LengthAwarePaginator $paginator,
         ?string $resource = null,
         string $message = 'Request successful',
+        array $meta = [],
     ): JsonResponse {
         $items = $paginator->getCollection();
 
-        return response()->json([
+        $payload = [
             'success' => true,
             'message' => $message,
             'data' => $resource !== null
@@ -83,7 +98,13 @@ trait ApiResponse
                 'total' => $paginator->total(),
                 'last_page' => $paginator->lastPage(),
             ],
-        ]);
+        ];
+
+        if ($meta !== []) {
+            $payload['meta'] = $meta;
+        }
+
+        return response()->json($payload);
     }
 
     /**

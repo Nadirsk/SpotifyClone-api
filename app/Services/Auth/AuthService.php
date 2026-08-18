@@ -60,6 +60,8 @@ final class AuthService
 
     public function __construct(
         private readonly UserRepository $users,
+        private readonly OtpService $otp,
+        private readonly EmailLoginCodeService $emailLoginCode,
     ) {}
 
     /**
@@ -76,6 +78,50 @@ final class AuthService
             'country' => $data['country'] ?? null,
             'language' => $data['language'] ?? config('app.locale'),
         ]);
+
+        UserRegistered::dispatch($user);
+
+        return [
+            'user' => $user,
+            'token' => $this->issueToken($user),
+        ];
+    }
+
+    /**
+     * Phone-native account: no email, no password — the phone OTP flow is the
+     * only credential this account will ever have. Not in
+     * 01_PRODUCT_REQUIREMENTS.md §6 (email + Google only), added at explicit
+     * request once phone OTP itself became real.
+     *
+     * @param  array{phone: string, name: string, country?: string|null, language?: string|null}  $data
+     * @return array{user: User, token: string}
+     *
+     * @throws ValidationException
+     */
+    public function registerWithPhone(array $data): array
+    {
+        /*
+         | The Form Request cannot check this itself — it has no reason to
+         | know about OtpService — so the guard lives here: without it,
+         | anyone could POST a made-up phone number straight to this endpoint
+         | and get an account for a number they never proved they control.
+         */
+        if (! $this->otp->wasRecentlyVerified($data['phone'])) {
+            throw ValidationException::withMessages([
+                'phone' => ['This phone number has not been verified. Please verify it again.'],
+            ]);
+        }
+
+        $user = $this->users->create([
+            'name' => $data['name'],
+            'phone' => $data['phone'],
+            'email' => null,
+            'password' => null,
+            'country' => $data['country'] ?? null,
+            'language' => $data['language'] ?? config('app.locale'),
+        ]);
+
+        $this->otp->linkToUser($data['phone'], $user);
 
         UserRegistered::dispatch($user);
 
@@ -120,6 +166,69 @@ final class AuthService
         }
 
         RateLimiter::clear($key);
+
+        return [
+            'user' => $user,
+            'token' => $this->issueToken($user),
+        ];
+    }
+
+    /**
+     * The phone flow's counterpart to `login()`: there is no password to
+     * check, so a verified OTP is the entire proof of identity. Deliberately
+     * does not create an account for an unrecognised phone — that would blur
+     * login and sign-up into one action, and the sign-up wizard collects a
+     * name this endpoint never sees.
+     *
+     * @return array{user: User, token: string}
+     *
+     * @throws ValidationException
+     */
+    public function loginWithPhone(string $phone): array
+    {
+        if (! $this->otp->wasRecentlyVerified($phone)) {
+            throw ValidationException::withMessages([
+                'phone' => ['This phone number has not been verified. Please verify it again.'],
+            ]);
+        }
+
+        $user = $this->users->findByPhone($phone);
+
+        if ($user === null) {
+            throw ValidationException::withMessages([
+                'phone' => ['No account exists for this phone number. Please sign up instead.'],
+            ]);
+        }
+
+        return [
+            'user' => $user,
+            'token' => $this->issueToken($user),
+        ];
+    }
+
+    /**
+     * Anti-enumeration passthrough — see EmailLoginCodeService::send() for
+     * why this never reveals whether the address has an account.
+     */
+    public function sendEmailLoginCode(string $email): void
+    {
+        $this->emailLoginCode->send($email);
+    }
+
+    /**
+     * The email flow's counterpart to `loginWithPhone()`: a verified code
+     * stands in for a password. Unlike the phone flow there is no separate
+     * "verify" step for the caller to have already done — every email
+     * belongs to an existing account already, so verifying the code and
+     * logging in are the same action here.
+     *
+     * @return array{user: User, token: string}
+     *
+     * @throws ValidationException
+     */
+    public function loginWithEmailCode(string $email, string $code): array
+    {
+        $user = $this->emailLoginCode->verify($email, $code);
 
         return [
             'user' => $user,

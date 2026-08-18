@@ -3,8 +3,10 @@
 declare(strict_types=1);
 use App\Models\Album;
 use App\Models\Artist;
+use App\Models\Genre;
 use App\Models\Playlist;
 use App\Models\Song;
+use App\Models\User;
 
 return [
 
@@ -64,6 +66,14 @@ return [
         'artist' => Artist::class,
         'album' => Album::class,
         'playlist' => Playlist::class,
+        /*
+         | Profiles and genres are this platform's own data rather than the
+         | provider's, which is why they arrived later than the four above. Both
+         | need a FULLTEXT index on their name column to be searchable at all —
+         | see 2026_08_15_130004_add_search_indexes_for_users_and_genres.
+         */
+        'user' => User::class,
+        'genre' => Genre::class,
     ],
 
     /*

@@ -39,4 +39,61 @@ final class DomainException extends HttpException
     {
         return new self(404, 'This song is not in the playlist.');
     }
+
+    public static function invitationInvalid(): self
+    {
+        return new self(404, 'This invite link is invalid, expired, or has been revoked.');
+    }
+
+    public static function cannotJoinOwnPlaylist(): self
+    {
+        return new self(422, 'You already own this playlist.');
+    }
+
+    public static function notACollaborator(): self
+    {
+        return new self(404, 'This user is not a collaborator on this playlist.');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Subscriptions and entitlements
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * 402 rather than 403: the caller is authenticated and the request is
+     * well-formed — the only thing missing is payment. That distinction is what
+     * lets the frontend show an upgrade prompt for this and a plain "not
+     * allowed" for a genuine authorization failure.
+     */
+    public static function premiumRequired(string $capability): self
+    {
+        return new self(402, "This feature requires Premium ({$capability}).");
+    }
+
+    public static function alreadySubscribed(string $plan): self
+    {
+        return new self(409, "You are already subscribed to the {$plan} plan.");
+    }
+
+    public static function noActiveSubscription(): self
+    {
+        return new self(404, 'You do not have an active subscription.');
+    }
+
+    public static function planNotPurchasable(): self
+    {
+        return new self(422, 'That plan cannot be purchased.');
+    }
+
+    /**
+     * The provider serves a fixed ladder of bitrates and this platform never
+     * transcodes (11_PROVIDER_INTEGRATION), so a track with no usable source
+     * URL cannot be downgraded into one.
+     */
+    public static function noAudioSource(): self
+    {
+        return new self(404, 'No playable audio source exists for this track.');
+    }
 }

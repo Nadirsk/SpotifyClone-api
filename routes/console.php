@@ -3,9 +3,12 @@
 declare(strict_types=1);
 
 use App\Jobs\CleanupJob;
+use App\Jobs\CrawlFrontierJob;
+use App\Jobs\DiscoverNewReleasesJob;
 use App\Jobs\RefreshTrendingJob;
 use App\Jobs\SyncAlbumsJob;
 use App\Jobs\SyncArtistsJob;
+use App\Jobs\SyncPlaylistsJob;
 use App\Jobs\SyncSongsJob;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -20,20 +23,59 @@ Artisan::command('inspire', function () {
 | Scheduler (07_SYNC_ENGINE §9)
 |--------------------------------------------------------------------------
 |
-| Every sync entry below is a no-op today: with no provider enabled and no
-| credentials configured, ProviderManager::enabled() returns an empty list and
-| the sync jobs return immediately (docs/DEFERRED.md §4). RefreshTrendingJob
-| and CleanupJob touch no provider and run for real starting with the first
-| deploy — trending needs listening history, not a provider.
+| Three distinct jobs, three cadences, and the distinction between them is the
+| whole design:
 |
-| withoutOverlapping() guards every entry: an incremental sync or cleanup run
-| that is still going when the next tick fires must not start a second copy
-| fighting the first over the same rows.
+| - **Discovery** (CrawlFrontierJob) finds records we do not have. It runs
+|   often because the frontier is a work queue — each tick claims a bounded
+|   batch, so throughput is a function of how frequently this fires and how
+|   many queue workers are up, not of any one run going long.
 |
-| `php artisan schedule:work` must be running for any of this to fire — see
-| README.md.
+| - **Freshness** (DiscoverNewReleasesJob) decides what is worth re-checking so
+|   newly released music appears automatically. It makes no provider calls
+|   itself; it re-opens cheap probes for the crawler to pick up, which keeps
+|   all outbound traffic behind one rate limiter.
+|
+| - **Refresh** (Sync*Job) keeps records we already have accurate, oldest
+|   first. Unchanged by this work except for the new playlist sibling.
+|
+| Nothing here fires unless `php artisan schedule:work` (or a system cron
+| calling `schedule:run`) is running, AND a queue worker is consuming the
+| `sync` queue — every entry below dispatches a job rather than doing work
+| inline. See README.md.
+|
+| With no provider enabled, every sync and crawl entry is a no-op:
+| ProviderManager::available() returns an empty list and the jobs return
+| immediately. RefreshTrendingJob and CleanupJob touch no provider and run for
+| real regardless.
+|
+| withoutOverlapping() guards every entry. It matters most for the crawl: a
+| batch that is still walking a 458-page discography when the next tick fires
+| must not start a second copy competing for the same leases.
 |
 */
+
+/*
+ | Discovery. Every five minutes rather than hourly because this is the job
+ | that builds the catalog in the first place, and on a cold install the
+ | frontier holds hundreds of thousands of targets — an hourly batch of 25
+ | would take years to drain. The batch size is the throttle here, not the
+ | interval.
+ */
+Schedule::job(new CrawlFrontierJob)
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->name('catalog:crawl');
+
+/*
+ | Freshness. Hourly is comfortably more often than needed to catch a release
+ | on its release day, and the job is deliberately cheap — it queries our own
+ | tables and re-opens frontier rows, making no provider calls of its own.
+ */
+Schedule::job(new DiscoverNewReleasesJob)
+    ->hourly()
+    ->withoutOverlapping()
+    ->name('catalog:new-releases');
 
 Schedule::job(new RefreshTrendingJob)
     ->everyFifteenMinutes()
@@ -54,6 +96,17 @@ Schedule::job(new SyncAlbumsJob)
     ->hourly()
     ->withoutOverlapping()
     ->name('sync:albums');
+
+/*
+ | Playlists refresh more often than the other three entity types. A song's
+ | metadata is essentially static once written, but an editorial playlist is
+ | defined by its tracklist and is re-curated constantly — one that has not
+ | been refreshed is wrong, not merely stale.
+ */
+Schedule::job(new SyncPlaylistsJob)
+    ->everyThirtyMinutes()
+    ->withoutOverlapping()
+    ->name('sync:playlists');
 
 Schedule::job(new CleanupJob)
     ->dailyAt('03:00')

@@ -10,6 +10,7 @@ use App\Models\Language;
 use App\Models\Provider;
 use App\Models\ProviderSongMapping;
 use App\Models\Song;
+use App\Services\Catalog\SoundtrackParser;
 use App\Services\Sync\DeduplicationService;
 use App\Services\Sync\MetadataNormalizer;
 use App\Services\Sync\SyncService;
@@ -38,7 +39,7 @@ class SyncServiceTest extends TestCase
         parent::setUp();
 
         $this->syncService = new SyncService(
-            new MetadataNormalizer,
+            new MetadataNormalizer(new SoundtrackParser),
             new DeduplicationService,
             app(LoggerInterface::class),
         );

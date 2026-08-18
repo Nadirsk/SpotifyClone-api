@@ -64,4 +64,11 @@ class PlaylistFactory extends Factory
             'user_id' => $user->getKey(),
         ]);
     }
+
+    public function collaborative(): static
+    {
+        return $this->state(fn (array $attributes): array => [
+            'is_collaborative' => true,
+        ]);
+    }
 }

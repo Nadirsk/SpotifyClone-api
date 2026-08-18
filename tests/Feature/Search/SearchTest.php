@@ -32,10 +32,10 @@ use Tests\TestCase;
  * immediately searchable. It costs a full re-migration per test — acceptable
  * for this file's small number of tests.
  *
- * QUEUE_CONNECTION=sync in phpunit.xml, so a zero-result search's
- * LazySyncSearchJob dispatch runs inline. With every provider disabled (the
- * seeded default) it is a safe no-op, not something these tests need to guard
- * against.
+ * QUEUE_CONNECTION=sync in phpunit.xml, so any LazySyncSearchJob a search
+ * dispatches would run inline. With every provider disabled (the seeded
+ * default) `SearchService::shouldSyncFromProvider()` never gets as far as
+ * dispatching one, so there is nothing here for these tests to guard against.
  */
 final class SearchTest extends TestCase
 {
@@ -82,6 +82,33 @@ final class SearchTest extends TestCase
         collect($response->json('data'))->each(
             fn (array $song) => $this->assertStringContainsString('Yyysearchable', $song['title'])
         );
+    }
+
+    public function test_typed_search_tolerates_a_misspelled_song_title(): void
+    {
+        Song::factory()->create(['title' => 'Wwwsearchable Serenade', 'popularity' => 80]);
+
+        // "abel" for "able" — a transposition, not a dropped trailing
+        // character, so it is not a prefix of the real title and FULLTEXT's
+        // own `+word*` cannot match it. Only the fuzzy fallback can.
+        $response = $this->getJson('/api/v1/search?q=Wwwsearchabel%20Serenade&type=song&limit=10');
+
+        $response->assertOk()->assertJsonPath('success', true);
+
+        $titles = collect($response->json('data'))->pluck('title');
+        $this->assertTrue($titles->contains('Wwwsearchable Serenade'));
+    }
+
+    public function test_global_search_tolerates_a_misspelled_artist_name(): void
+    {
+        Artist::factory()->create(['name' => 'Vvvsearchable Ensemble', 'popularity' => 60]);
+
+        $response = $this->getJson('/api/v1/search?q=Vvvsearchible%20Ensemble');
+
+        $response->assertOk()->assertJsonPath('success', true);
+
+        $names = collect($response->json('data.artists'))->pluck('name');
+        $this->assertTrue($names->contains('Vvvsearchable Ensemble'));
     }
 
     public function test_missing_query_term_is_rejected(): void

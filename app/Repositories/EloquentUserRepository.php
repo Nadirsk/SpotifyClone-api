@@ -22,6 +22,17 @@ final class EloquentUserRepository implements UserRepository
         return User::query()->where('email', $email)->first();
     }
 
+    public function findByPhone(string $phone): ?User
+    {
+        return User::query()->where('phone', $phone)->first();
+    }
+
+    public function findOrFail(string $id): User
+    {
+        /** @var User */
+        return User::query()->findOrFail($id);
+    }
+
     public function update(User $user, array $attributes): User
     {
         $user->fill($attributes)->save();

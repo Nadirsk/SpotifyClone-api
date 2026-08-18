@@ -7,6 +7,7 @@ namespace App\Providers;
 use App\Contracts\Providers\ProviderAdapter;
 use App\Services\Providers\Apple\AppleMusicAdapter;
 use App\Services\Providers\Deezer\DeezerAdapter;
+use App\Services\Providers\ITunes\ITunesSearchAdapter;
 use App\Services\Providers\JioSaavn\JioSaavnAdapter;
 use App\Services\Providers\LastFm\LastFmAdapter;
 use App\Services\Providers\MusicBrainz\MusicBrainzAdapter;
@@ -42,6 +43,7 @@ class ProviderIntegrationServiceProvider extends ServiceProvider
         MusicBrainzAdapter::class,
         LastFmAdapter::class,
         JioSaavnAdapter::class,
+        ITunesSearchAdapter::class,
     ];
 
     public function register(): void

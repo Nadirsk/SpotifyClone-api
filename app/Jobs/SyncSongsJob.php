@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
+use App\Exceptions\ProviderUnavailableException;
 use App\Models\ProviderSongMapping;
 use App\Services\Providers\ProviderManager;
 use App\Services\Sync\SyncService;
@@ -59,7 +60,7 @@ final class SyncSongsJob implements ShouldQueue
 
     public function handle(ProviderManager $providers, SyncService $sync, LoggerInterface $logger): void
     {
-        $adapters = $providers->enabled();
+        $adapters = $providers->available();
 
         if ($this->providerKey !== null) {
             $adapters = array_values(array_filter(
@@ -97,18 +98,40 @@ final class SyncSongsJob implements ShouldQueue
 
             $synced = 0;
 
-            foreach ($mappings as $mapping) {
-                $data = $adapter->getSong((string) $mapping->provider_song_id);
+            try {
+                foreach ($mappings as $mapping) {
+                    $data = $adapter->getSong((string) $mapping->provider_song_id);
 
-                if ($data === null) {
-                    // Adapter already logged the cause; the mapping keeps its old
-                    // timestamp so the next run picks it up again.
-                    continue;
-                }
+                    if ($data === null) {
+                        // The provider answered and has no such song any more.
+                        // The mapping keeps its old timestamp so the next run
+                        // picks it up again.
+                        continue;
+                    }
 
-                if ($sync->syncSong($record, $data) !== null) {
-                    $synced++;
+                    if ($sync->syncSong($record, $data) !== null) {
+                        $synced++;
+                    }
                 }
+            } catch (ProviderUnavailableException $exception) {
+                /*
+                 | Cut short, not failed. Whatever was refreshed before the
+                 | provider stopped answering is already committed, and every
+                 | mapping we did not reach kept its old `last_synced_at`, so
+                 | the next scheduled run resumes exactly where this one
+                 | stopped — no bookkeeping needed.
+                 |
+                 | Deliberately not `release()`d for a retry: a rate-limit park
+                 | routinely outlives this job's five attempts, and burning them
+                 | against a closed door only moves the batch to the failed-jobs
+                 | table. This job is scheduled; the schedule is the retry.
+                 */
+                $logger->warning('Incremental song sync stopped: provider unavailable', array_merge(
+                    ['synced_before_stopping' => $synced],
+                    $exception->context(),
+                ));
+
+                continue;
             }
 
             $record->forceFill(['last_synced_at' => Carbon::now()])->save();

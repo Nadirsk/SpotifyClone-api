@@ -20,11 +20,19 @@ class ProviderSeeder extends Seeder
     /** @var list<array{string, string, int, string}> */
     private const PROVIDERS = [
         ['Spotify', 'spotify', 1, 'SPOTIFY_ENABLED'],
-        ['Apple Music', 'apple_music', 2, 'APPLE_MUSIC_ENABLED'],
+        // api_name must equal AppleMusicAdapter::key() ('apple'), or
+        // ProviderManager::enabled() can never resolve this row to its
+        // adapter regardless of credentials — this was 'apple_music' and dead.
+        ['Apple Music', 'apple', 2, 'APPLE_MUSIC_ENABLED'],
         ['Deezer', 'deezer', 3, 'DEEZER_ENABLED'],
         ['MusicBrainz', 'musicbrainz', 4, 'MUSICBRAINZ_ENABLED'],
         ['Last.fm', 'lastfm', 5, 'LASTFM_ENABLED'],
         ['JioSaavn', 'jiosaavn', 6, 'JIOSAAVN_ENABLED'],
+        // Free public Search API — distinct from the paid 'apple' row above.
+        // Lower priority number than JioSaavn's would be wrong: JioSaavn is
+        // the stronger source for this catalog's Indian/regional content, and
+        // LazySyncSearchJob stops at the first provider with results.
+        ['iTunes', 'itunes', 7, 'ITUNES_ENABLED'],
     ];
 
     public function run(): void

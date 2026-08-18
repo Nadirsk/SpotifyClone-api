@@ -57,11 +57,11 @@ final class PlaylistController extends Controller
     }
 
     /** GET /playlists/{playlist} */
-    public function show(string $playlist): JsonResponse
+    public function show(Request $request, string $playlist): JsonResponse
     {
         $model = $this->playlists->show($playlist);
 
-        Gate::authorize('view', $model);
+        Gate::authorize('view', [$model, $model->isCollaborator($this->viewer($request))]);
 
         return $this->respondSuccess(new PlaylistResource($model), 'Playlist retrieved');
     }
@@ -96,7 +96,7 @@ final class PlaylistController extends Controller
     {
         $model = $this->playlists->find($playlist);
 
-        Gate::authorize('addSong', $model);
+        Gate::authorize('addSong', [$model, $model->isCollaborator($this->viewer($request))]);
 
         return $this->respondCreated(
             new PlaylistResource($this->playlists->addSong($model, $request->songId())),
@@ -105,11 +105,11 @@ final class PlaylistController extends Controller
     }
 
     /** DELETE /playlists/{playlist}/songs/{song} */
-    public function removeSong(string $playlist, string $song): JsonResponse
+    public function removeSong(Request $request, string $playlist, string $song): JsonResponse
     {
         $model = $this->playlists->find($playlist);
 
-        Gate::authorize('removeSong', $model);
+        Gate::authorize('removeSong', [$model, $model->isCollaborator($this->viewer($request))]);
 
         $this->playlists->removeSong($model, $song);
 

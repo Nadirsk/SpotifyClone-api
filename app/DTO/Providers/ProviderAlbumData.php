@@ -15,6 +15,10 @@ final readonly class ProviderAlbumData
      * @param  string  $externalId  The provider's own ID. Only ever persisted in provider_album_mappings.
      * @param  string|null  $releaseDate  `Y-m-d`; providers that only give a year are widened to 1 January.
      * @param  int|null  $popularity  0–100.
+     * @param  list<string>  $artistIds  Provider IDs of every credited artist, for the crawler's closure.
+     *                                   Not persisted — see {@see ProviderSongData::$artistIds}.
+     * @param  int|null  $playCount  The provider's raw counter, unscaled; `$popularity` is the same
+     *                               number squashed into the schema's 0–100 column.
      */
     public function __construct(
         public string $provider,
@@ -28,6 +32,10 @@ final readonly class ProviderAlbumData
         public ?int $totalTracks = null,
         public ?int $popularity = null,
         public ?string $externalUrl = null,
+        public array $artistIds = [],
+        public ?string $description = null,
+        public ?int $playCount = null,
+        public ?bool $explicit = null,
     ) {}
 
     /** @see ProviderSongData::checksum() for why these fields and this encoding. */
@@ -43,6 +51,8 @@ final readonly class ProviderAlbumData
             $this->totalTracks,
             $this->popularity,
             $this->externalUrl,
+            $this->description,
+            $this->explicit,
         ]));
     }
 }
