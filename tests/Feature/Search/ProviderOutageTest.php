@@ -13,6 +13,12 @@ use Illuminate\Support\Sleep;
 use Tests\TestCase;
 
 /**
+ * Every search here carries `sync=1`. Reaching the provider is opt-in — see
+ * SearchQuery::$sync — so a search without it never leaves the building and
+ * there would be no outage to contain. The flag is what puts these tests on
+ * the path they are about; `test_typing_never_reaches_the_provider()` below
+ * covers the other side of the same switch.
+ *
  * The containment guarantee: a metadata provider having a bad day must not be
  * something a listener can perceive.
  *
@@ -68,7 +74,7 @@ final class ProviderOutageTest extends TestCase
         Song::factory()->create(['title' => 'Zzzsearchable Odyssey']);
         $this->fakeOutage();
 
-        $response = $this->getJson('/api/v1/search?q=Zzzsearchable');
+        $response = $this->getJson('/api/v1/search?q=Zzzsearchable&sync=1');
 
         // Not a 500, not a 503, not an empty list: the catalog knows this song
         // and the provider was never needed to say so.
@@ -85,7 +91,7 @@ final class ProviderOutageTest extends TestCase
         // The first search finds the provider available, tries it, is refused,
         // and parks it — so by the time the envelope is built we know we are
         // serving a partial answer, and say so.
-        $response = $this->getJson('/api/v1/search?q=Zzzsearchable');
+        $response = $this->getJson('/api/v1/search?q=Zzzsearchable&sync=1');
 
         $response->assertOk()
             ->assertJsonPath('meta.degraded', true)
@@ -97,7 +103,7 @@ final class ProviderOutageTest extends TestCase
         Song::factory()->create(['title' => 'Zzzsearchable Odyssey']);
         Http::fake(['*' => Http::response(['success' => true, 'data' => ['total' => 0, 'results' => []]])]);
 
-        $response = $this->getJson('/api/v1/search?q=Zzzsearchable');
+        $response = $this->getJson('/api/v1/search?q=Zzzsearchable&sync=1');
 
         // Absent rather than false, so a client can treat its presence as the
         // whole signal.
@@ -109,7 +115,7 @@ final class ProviderOutageTest extends TestCase
         Song::factory()->create(['title' => 'Zzzsearchable Odyssey']);
         $this->fakeOutage();
 
-        $response = $this->getJson('/api/v1/search?q=Zzzsearchable&type=song');
+        $response = $this->getJson('/api/v1/search?q=Zzzsearchable&type=song&sync=1');
 
         $response->assertOk()
             ->assertJsonPath('data.0.title', 'Zzzsearchable Odyssey')
@@ -122,16 +128,44 @@ final class ProviderOutageTest extends TestCase
         $this->fakeOutage();
 
         // First search: parks the provider after one refusal.
-        $this->getJson('/api/v1/search?q=Zzzsearchable')->assertOk();
+        $this->getJson('/api/v1/search?q=Zzzsearchable&sync=1')->assertOk();
         Http::assertSentCount(1);
 
         // Second search while parked: no outbound call, and — the point — no
         // debounce slot claimed either, since nothing was asked of the
         // provider. Otherwise this term would be locked out of syncing for 15
         // minutes after recovery, having never once reached the provider.
-        $this->getJson('/api/v1/search?q=Zzzsearchable')->assertOk();
+        $this->getJson('/api/v1/search?q=Zzzsearchable&sync=1')->assertOk();
         Http::assertSentCount(1);
 
+        $this->assertFalse(
+            Cache::has('providers:lazy_sync_debounce:all:'.hash('xxh128', 'zzzsearchable')),
+        );
+    }
+
+    /**
+     * The regression guard for the type-ahead.
+     *
+     * A search field issues a request per keystroke pause, and every prefix of
+     * a word is a distinct term with its own debounce key — so the per-term
+     * debounce that protects a repeated search protects nothing at all against
+     * typing. Before the `sync` flag existed, typing one artist name spent a
+     * full provider search on each of "a", "ar", "ari", "arij"… This asserts
+     * the only thing that actually stops that: no flag, no outbound call.
+     */
+    public function test_typing_never_reaches_the_provider(): void
+    {
+        Song::factory()->create(['title' => 'Zzzsearchable Odyssey']);
+        Http::fake(['*' => Http::response(['success' => true, 'data' => ['total' => 0, 'results' => []]])]);
+
+        foreach (['Z', 'Zz', 'Zzz', 'Zzzsearch', 'Zzzsearchable'] as $prefix) {
+            $this->getJson('/api/v1/search?q='.$prefix)->assertOk();
+        }
+
+        Http::assertNothingSent();
+
+        // And no debounce slot burned either, so the moment the user commits to
+        // the term it is still free to sync.
         $this->assertFalse(
             Cache::has('providers:lazy_sync_debounce:all:'.hash('xxh128', 'zzzsearchable')),
         );

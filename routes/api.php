@@ -176,6 +176,9 @@ Route::middleware('auth:sanctum')->get('recommendations', [RecommendationControl
 
 Route::get('genres', [GenreController::class, 'index']);
 Route::get('languages', [LanguageController::class, 'index']);
+// Grouped so `/popular-by-country` is one request rather than one per language;
+// the fan-out version tripped the guest rate limit on every page load.
+Route::get('languages/popular-albums', [LanguageController::class, 'popularAlbums']);
 
 /*
 |--------------------------------------------------------------------------
