@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Http\Resources;
 
 use App\Models\Song;
+use App\Models\SongCredit;
+use App\Models\User;
+use App\Services\Catalog\AudioAccess;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -35,7 +38,15 @@ final class SongResource extends JsonResource
             'isrc' => $this->isrc,
             'release_date' => $this->release_date?->toDateString(),
             'popularity' => $this->popularity,
-            'preview_url' => $this->preview_url,
+            /*
+             | Clamped to the caller's plan, not emitted raw. The stored column
+             | is the top of the provider's ladder, so returning it here handed
+             | every free account a premium-quality URL and made the ceiling in
+             | PlaybackService unenforceable — see AudioAccess for the whole
+             | account. Guests resolve to the free tier rather than to null:
+             | the catalog stays audible without an account.
+             */
+            'preview_url' => $this->audioUrlFor($request),
             'external_url' => $this->external_url,
 
             /*
@@ -63,6 +74,52 @@ final class SongResource extends JsonResource
                 'id' => $this->language->id,
                 'name' => $this->language->name,
             ]),
+
+            /*
+             | Everyone the provider credits, with the role. `whenLoaded` like
+             | every other relation here, so this costs nothing on the listing
+             | endpoints that do not ask for it — a tracklist serialising fifty
+             | songs must not turn into fifty credit queries.
+             |
+             | `role` is the normalized CreditRole value and `role_label` is how
+             | it reads in a credits block. Both, because a client needs to
+             | switch on the first and display the second, and deriving the
+             | label client-side would mean re-implementing the vocabulary in
+             | TypeScript and letting the two drift.
+             |
+             | Actor credits ARE included here, unlike in the discography query:
+             | a soundtrack's credits block is exactly where "starring" belongs.
+             | What it must not do is put someone else's songs on an actor's
+             | page — see CreditRole::isMusicCredit().
+             */
+            'credits' => $this->whenLoaded('credits', fn (): array => $this->credits
+                ->filter(fn (SongCredit $credit): bool => $credit->relationLoaded('artist') && $credit->artist !== null)
+                ->map(fn (SongCredit $credit): array => [
+                    'role' => $credit->role->value,
+                    'role_label' => $credit->role->label(),
+                    'artist' => [
+                        'id' => $credit->artist->id,
+                        'name' => $credit->artist->name,
+                    ],
+                ])
+                ->values()
+                ->all()),
         ];
+    }
+
+    /**
+     * The playable URL for whoever is asking.
+     *
+     * Resolved through the container rather than injected: a JsonResource is
+     * constructed by Eloquent collections and by `::make()` all over the app,
+     * so it has no constructor to inject into. `AudioAccess` is request-scoped
+     * and memoises the plan lookup, so serialising a fifty-row tracklist still
+     * reads the subscription once.
+     */
+    private function audioUrlFor(Request $request): ?string
+    {
+        $user = $request->user();
+
+        return app(AudioAccess::class)->urlFor($this->resource, $user instanceof User ? $user : null);
     }
 }

@@ -51,6 +51,7 @@ final class SyncService
     public function __construct(
         private readonly MetadataNormalizer $normalizer,
         private readonly DeduplicationService $deduplicator,
+        private readonly CreditWriter $credits,
         private readonly LoggerInterface $logger,
     ) {}
 
@@ -138,7 +139,22 @@ final class SyncService
             $song = $this->deduplicator->findSong($data, $provider, $artist, $album);
             $attributes = $this->normalizer->songAttributes($data, $artist, $album);
 
-            $song = $this->writeEntity(Song::class, $song, $attributes);
+            $song = $this->writeEntity(
+                Song::class,
+                $song,
+                $this->withStableAlbumMembership($song, $data, $attributes),
+            );
+
+            /*
+             | Everyone else on the record. Written after the song row exists
+             | (the credit rows point at it) and inside the same transaction, so
+             | a song can never be committed with a half-written credit list.
+             |
+             | Not gated on anything: a payload with no credits is a no-op
+             | inside the writer, which is what keeps a provider that does not
+             | publish them from clearing another's.
+             */
+            $this->credits->write($song, $provider, $data->credits);
 
             $this->writeMapping(
                 ProviderSongMapping::class,
@@ -438,6 +454,78 @@ final class SyncService
         $mapping->forceFill(['last_synced_at' => Carbon::now()])->saveQuietly();
 
         return $entity;
+    }
+
+    /**
+     * Keep a song attached to the album a tracklist put it on.
+     *
+     * ## The bug this fixes
+     *
+     * `album_id` was rewritten on every sync from whatever `resolveAlbumForSong()`
+     * made of the incoming payload's album *name*. That name is authoritative
+     * when the song arrived as part of an album's tracklist, and a guess when it
+     * arrived from a search result — where JioSaavn frequently reports a single
+     * release (`Shararat (From "Dhurandhar")`) for a track that is also on the
+     * soundtrack album (`Dhurandhar`), or the reverse.
+     *
+     * The consequence was an album whose contents changed depending on which
+     * crawl path had touched its songs most recently: opening the same album
+     * twice showed different tracklists, one of them including a song that
+     * belongs to a different album — the reported "album shows songs that aren't
+     * on it" bug, reproduced live while browsing.
+     *
+     * ## The rule
+     *
+     * A non-null `trackNumber` is the marker of authority: `JioSaavnAdapter`
+     * supplies it only from `albumTracks()`, so it means "the provider listed
+     * this song, at this position, on this album." Given that, membership is
+     * written. Without it, membership is written only when the song has none yet;
+     * an existing attachment is left alone.
+     *
+     * ## And the position
+     *
+     * When membership *does* legitimately move, `track_number` is cleared rather
+     * than carried over — a position is meaningful only relative to the album it
+     * was measured on. Leaving it behind is what produced albums with four
+     * different tracks all claiming to be track 1, which then sorted in an order
+     * matching neither album.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @return array<string, mixed>
+     */
+    private function withStableAlbumMembership(?Song $song, ProviderSongData $data, array $attributes): array
+    {
+        $authoritative = $data->trackNumber !== null;
+
+        // Nothing to protect: a brand new row, or one that has no album yet.
+        if ($song === null || $song->album_id === null) {
+            return $attributes;
+        }
+
+        if (! $authoritative) {
+            /*
+             | A search-sourced payload has no standing to move this song. Drop
+             | both keys — `track_number` too, since a position without the album
+             | it belongs to is meaningless.
+             */
+            unset($attributes['album_id'], $attributes['track_number']);
+
+            return $attributes;
+        }
+
+        $incoming = $attributes['album_id'] ?? null;
+
+        if ($incoming !== null && (string) $incoming !== (string) $song->album_id) {
+            /*
+             | An authoritative move to a different album. `writeEntity()` drops
+             | nulls, so the stale position cannot be cleared by passing null —
+             | it is zeroed on the model directly, and the new position in
+             | $attributes then overwrites it.
+             */
+            $song->forceFill(['track_number' => null]);
+        }
+
+        return $attributes;
     }
 
     /**

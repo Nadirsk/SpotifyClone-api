@@ -26,10 +26,15 @@ final class LoginCodeMail extends Mailable
         public readonly int $ttlMinutes,
     ) {}
 
+    /**
+     * The product name comes from `app.name`, not a literal — the subject
+     * sits next to a From name built from `mail.from.name`, and the two
+     * disagreeing (as they did) is visible to the recipient.
+     */
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: "{$this->code} – your Resonance login code",
+            subject: $this->code.' – your '.config('app.name').' login code',
         );
     }
 

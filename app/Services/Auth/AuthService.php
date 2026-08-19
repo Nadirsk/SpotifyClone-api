@@ -207,8 +207,11 @@ final class AuthService
     }
 
     /**
-     * Anti-enumeration passthrough — see EmailLoginCodeService::send() for
-     * why this never reveals whether the address has an account.
+     * @throws ValidationException Propagated from EmailLoginCodeService::send()
+     *                             — a throttle hit, an address with no
+     *                             account, or a transport failure. See that
+     *                             method for why it reports these rather than
+     *                             returning quietly as it once did.
      */
     public function sendEmailLoginCode(string $email): void
     {

@@ -7,10 +7,12 @@ namespace App\Services\Providers\JioSaavn;
 use App\Contracts\Providers\SupportsCatalogCrawl;
 use App\Contracts\Providers\SupportsPlaylists;
 use App\DTO\Providers\ProviderAlbumData;
+use App\DTO\Providers\ProviderArtistCredit;
 use App\DTO\Providers\ProviderArtistData;
 use App\DTO\Providers\ProviderPage;
 use App\DTO\Providers\ProviderPlaylistData;
 use App\DTO\Providers\ProviderSongData;
+use App\Enums\CreditRole;
 use App\Services\Providers\AbstractProviderAdapter;
 
 /**
@@ -687,6 +689,7 @@ final class JioSaavnAdapter extends AbstractProviderAdapter implements SupportsC
             externalUrl: $this->str($this->dig($item, 'url')),
             albumId: $this->str($this->dig($item, 'album.id')),
             artistIds: $this->creditedArtistIds($item),
+            credits: $this->credits($item),
             playCount: $this->int($this->dig($item, 'playCount')),
             label: $this->decoded($this->dig($item, 'label')),
             copyright: $this->decoded($this->dig($item, 'copyright')),
@@ -980,6 +983,104 @@ final class JioSaavnAdapter extends AbstractProviderAdapter implements SupportsC
     }
 
     /**
+     * Every credit on a song, with the role and the name — not just the ID.
+     *
+     * {@see creditedArtistIds()} above reads the same three places in the
+     * payload and throws away everything except the IDs, because all it is for
+     * is telling the crawler which artist pages to visit. That is why the
+     * catalog has had no notion of a featured vocalist or a composer: the
+     * information was arriving on every single song payload, being parsed, and
+     * then discarded for want of somewhere to put it.
+     *
+     * Three places, because no one of them is complete:
+     *
+     * - `artists.primary` carries the headline names but tags them all
+     *   `primary_artists`, so it cannot say who sang and who wrote.
+     * - `artists.all` carries the real roles — `singer`, `music`, `lyricist`,
+     *   `starring` — but frequently omits the headline singer entirely.
+     *   Observed on "Apna Bana Le": `all` credits Sachin-Jigar (music),
+     *   Amitabh Bhattacharya (lyricist) and two actors, and does NOT mention
+     *   Arijit Singh, who is the person singing it. He is in `primary`.
+     * - `artists.featured` is usually empty and is the only place a guest
+     *   credit appears when it is not.
+     *
+     * The union of the three is the credit list. A person legitimately holds
+     * two roles on one track, so entries are keyed by ID *and* role and only an
+     * exact repeat collapses.
+     *
+     * Names go through {@see looksLikeCreditLine()} — unlike in
+     * `creditedArtistIds()`, where they are not needed — because a name that is
+     * really a whole credit line ("Sachin-Jigar|Arijit Singh") would otherwise
+     * be created as an artist in its own right by the backfill. The ID survives
+     * a rejected name: the credit still links correctly whenever that provider
+     * ID is already mapped to a local artist.
+     *
+     * Sorted before returning, by role then ID. The provider reorders its own
+     * arrays between requests for the same track, and the result is folded into
+     * {@see ProviderSongData::checksum()} — unsorted, every refresh would look
+     * like a change and rewrite the whole catalog.
+     *
+     * @param  array<array-key, mixed>  $item
+     * @return list<ProviderArtistCredit>
+     */
+    private function credits(array $item): array
+    {
+        $credits = [];
+
+        foreach (['artists.primary' => 'primary_artists', 'artists.featured' => 'featured_artists', 'artists.all' => null] as $path => $defaultRole) {
+            $entries = $this->dig($item, $path);
+
+            if (! is_array($entries)) {
+                continue;
+            }
+
+            $position = [];
+
+            foreach ($entries as $entry) {
+                if (! is_array($entry)) {
+                    continue;
+                }
+
+                $externalId = $this->str($this->dig($entry, 'id'));
+                $role = CreditRole::fromProvider($this->str($this->dig($entry, 'role')) ?? $defaultRole);
+
+                if ($externalId === null || trim($externalId) === '' || $role === null) {
+                    continue;
+                }
+
+                $name = $this->decoded($this->dig($entry, 'name'));
+
+                if ($name !== null && $this->looksLikeCreditLine($name)) {
+                    $name = null;
+                }
+
+                $position[$role->value] = ($position[$role->value] ?? -1) + 1;
+
+                $credit = new ProviderArtistCredit(
+                    externalId: trim($externalId),
+                    role: $role,
+                    name: $name,
+                    position: $position[$role->value],
+                );
+
+                /*
+                 | First mention wins. `artists.primary` is read first and is
+                 | the one shape whose names are reliably a single person, so
+                 | when the same ID appears again under `all` with the same
+                 | role the earlier, cleaner name is kept.
+                 */
+                $credits[$credit->key()] ??= $credit;
+            }
+        }
+
+        $credits = array_values($credits);
+
+        usort($credits, static fn (ProviderArtistCredit $a, ProviderArtistCredit $b): int => [$a->role->weight(), $a->position, $a->externalId] <=> [$b->role->weight(), $b->position, $b->externalId]);
+
+        return $credits;
+    }
+
+    /**
      * A song or album's primary-credited artist, skipping over any entry that
      * is itself a credit line.
      *
@@ -996,7 +1097,73 @@ final class JioSaavnAdapter extends AbstractProviderAdapter implements SupportsC
      */
     private function primaryArtist(array $item): ?string
     {
-        return $this->singerCredit($item) ?? $this->firstPrimaryArtist($item);
+        return $this->singerCredit($item)
+            ?? $this->performingPrimaryArtist($item)
+            ?? $this->firstPrimaryArtist($item);
+    }
+
+    /**
+     * The first `artists.primary` entry who is not credited purely off-mic.
+     *
+     * Sits between the two older rules because both were wrong for a common
+     * shape. "Apna Bana Le" carries no `singer` role at all, so `singerCredit()`
+     * returns null and the fallback took `artists.primary[0]` — Amitabh
+     * Bhattacharya, its *lyricist*. The song was therefore filed and displayed
+     * under the lyricist rather than Arijit Singh, who sings it, and appeared on
+     * the wrong artist's page.
+     *
+     * The provider does not state who performed it. But it does state who wrote
+     * the words (`lyricist`), who wrote the music (`music`) and who acted in the
+     * film (`starring`), and `artists.primary` is a short list of the people who
+     * headline the track. Someone on that list carrying none of those three
+     * roles is, by elimination, on it for performing. That is the pick.
+     *
+     * Only reached when no explicit `singer` credit exists, so it never
+     * overrules the provider actually saying who sang.
+     *
+     * @param  array<array-key, mixed>  $item
+     */
+    private function performingPrimaryArtist(array $item): ?string
+    {
+        $offMic = [];
+
+        foreach ($this->credits($item) as $credit) {
+            if (in_array($credit->role, [CreditRole::Lyricist, CreditRole::Composer, CreditRole::Actor], true)) {
+                $offMic[$credit->externalId] = true;
+            }
+        }
+
+        if ($offMic === []) {
+            // Nothing to eliminate on, so this rule has no opinion and the
+            // caller's own fallback is as good as anything here.
+            return null;
+        }
+
+        $primaries = $this->dig($item, 'artists.primary');
+
+        if (! is_array($primaries)) {
+            return null;
+        }
+
+        foreach ($primaries as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+
+            $externalId = $this->str($this->dig($entry, 'id'));
+
+            if ($externalId !== null && isset($offMic[trim($externalId)])) {
+                continue;
+            }
+
+            $name = $this->decoded($this->dig($entry, 'name'));
+
+            if ($name !== null && ! $this->looksLikeCreditLine($name)) {
+                return $name;
+            }
+        }
+
+        return null;
     }
 
     /** @param array<array-key, mixed> $item */

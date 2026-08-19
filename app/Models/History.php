@@ -19,6 +19,9 @@ class History extends Model
     /** @var list<string> */
     protected $fillable = [
         'user_id',
+        // Null once there is an account; identifies a signed-out listener's
+        // browser for the play dedupe window and nothing else.
+        'session_id',
         'song_id',
         'played_at',
         'ms_played',

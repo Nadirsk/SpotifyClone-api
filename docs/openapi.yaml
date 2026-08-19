@@ -413,6 +413,21 @@ paths:
     get:
       tags: [Artists]
       summary: An artist's songs
+      description: >
+        Every song the artist is credited on in a music role — as the headline
+        artist, a singer, a featured guest, the composer or the lyricist — not
+        only the songs whose `artist` field names them.
+
+
+        The distinction is large in practice. A music director's page returned 17
+        songs when this was scoped to the display artist alone and returns 51 now;
+        a lyricist's went from 67 to 452. Clients that were treating this as
+        "songs whose artist is X" should expect a superset of that.
+
+
+        `actor` credits are excluded. A film star credited on a soundtrack did not
+        make the music, so those songs do not appear here even though `GET
+        /songs/{id}` lists the credit.
       security: []
       parameters:
         - $ref: "#/components/parameters/IdPath"
@@ -500,9 +515,35 @@ paths:
   /trending/songs:
     get:
       tags: [Trending]
-      summary: Trending songs (same as /songs/trending)
+      summary: Trending songs, or today's chart
+      description: >
+        Without `window`, the rolling trending list — a 7-day play total decayed
+        by a 48-hour half-life (`trending_score`), the same list
+        `/songs/trending` returns.
+
+
+        With `window=today`, the daily chart instead: plays since local
+        midnight, counted rather than decayed, most played first. These answer
+        different questions and are deliberately separate — trending is smooth by
+        design and barely moves between one day and the next, so using it for a
+        "today" list showed yesterday's ranking all morning.
+
+
+        A `today` request can legitimately return an empty list: below
+        `music.trending.min_today` plays there is not enough listening to rank,
+        and the endpoint declines rather than padding the day out with the weekly
+        list. `message` names the window that answered ("Top songs today" or
+        "Trending songs"), so a client can label the list correctly.
       security: []
-      parameters: [ $ref: "#/components/parameters/Limit" ]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - name: window
+          in: query
+          required: false
+          description: "`today` for the daily chart. Anything else, or omitted, is the rolling trending list."
+          schema:
+            type: string
+            enum: [today]
       responses:
         "200": { $ref: "#/components/responses/SongList" }
 
@@ -853,7 +894,12 @@ paths:
                       data:
                         type: object
                         properties:
-                          token: { type: string, description: Build the share URL client-side, e.g. `/playlist/{id}/collaborate/{token}`. }
+                          # Quoted: an unquoted inline description containing `{`
+                          # and `}` is not valid inline YAML, and made the whole
+                          # document fail to parse.
+                          token:
+                            type: string
+                            description: "Build the share URL client-side, e.g. `/playlist/{id}/collaborate/{token}`."
                           expires_at: { type: string, format: date-time }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1031,9 +1077,26 @@ paths:
       tags: [History]
       summary: Record a play
       description: >
-        A repeat play of the same song inside
-        `config('music.history.dedupe_window_minutes')` is deduplicated:
-        the endpoint returns 200 with no new row, instead of 201.
+        Unauthenticated, unlike the rest of this resource: a signed-out listener
+        can play the catalog, so their plays have to count too — every popularity
+        figure in the product is derived from this table, and one built only from
+        signed-in plays describes subscribers while claiming to describe
+        listening. The caller is still resolved when a bearer token is present.
+
+
+        A play is **not** counted in two cases, both of which return 200 with a
+        null `data` rather than an error, because the client did nothing wrong:
+
+
+        * **Too short.** `ms_played` below the listen threshold
+          (`config('music.history.min_play_seconds')`, or half the track for
+          something too short to reach it) is a skip, not a play. Omitting
+          `ms_played` entirely still counts, for clients that cannot report it.
+        * **Already counted.** The same listener played the same song inside
+          `config('music.history.dedupe_window_minutes')`.
+      security:
+        - {}
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -1043,7 +1106,19 @@ paths:
               required: [song_id]
               properties:
                 song_id: { type: string, format: uuid }
-                ms_played: { type: integer, minimum: 0, nullable: true }
+                ms_played:
+                  type: integer
+                  minimum: 0
+                  nullable: true
+                  description: Milliseconds actually listened. Compared against the listen threshold.
+                session_id:
+                  type: string
+                  maxLength: 64
+                  nullable: true
+                  description: >
+                    Opaque per-browser identifier, used only to deduplicate a
+                    signed-out listener's repeat plays. Ignored entirely when the
+                    request carries a token — the account is the identity then.
       responses:
         "201":
           description: Play recorded
@@ -1436,7 +1511,24 @@ components:
         isrc: { type: string, nullable: true }
         release_date: { type: string, format: date, nullable: true }
         popularity: { type: integer, minimum: 0, maximum: 100 }
-        preview_url: { type: string, format: uri, nullable: true }
+        preview_url:
+          type: string
+          format: uri
+          nullable: true
+          description: >
+            The provider URL to play, clamped to the *caller's* audio-quality
+            entitlement — so the same song yields a different variant to a Free
+            listener than to a Premium one, and a guest resolves to the free
+            tier rather than to null. Null only when the song has no source at
+            all.
+
+
+            Because it is entitlement-scoped, this field must not be stored in a
+            cache shared between listeners. Clients that need to know which tier
+            they actually got, or that want the best their plan allows for
+            playback, should read `GET /songs/{id}/stream` instead — that is the
+            authoritative resolver, and the one place a client should take the
+            quality from.
         external_url: { type: string, format: uri, nullable: true }
         artist: { $ref: "#/components/schemas/Artist" }
         album: { $ref: "#/components/schemas/Album" }
@@ -1452,6 +1544,46 @@ components:
           properties:
             id: { type: string, format: uuid }
             name: { type: string }
+        credits:
+          type: array
+          description: >
+            Everyone the provider credits on the recording, with the role. Present
+            only on `GET /songs/{id}` — listing endpoints omit the field entirely
+            rather than emitting an empty array, because serialising a fifty-row
+            tracklist must not load credits nobody is going to show.
+
+
+            Distinct from `artist`, which is the single display name a row has
+            room for. A song has one `artist` and several `credits`, and the
+            `artist` is always among them.
+
+
+            Ordered as a credits block prints: artist, singer, featured artist,
+            composer, lyricist, then cast.
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+                enum: [primary, featured, singer, composer, lyricist, actor]
+                description: >
+                  Normalized, never the provider's own token — a client must not
+                  be able to tell JioSaavn's `music` from another provider's
+                  `composer`.
+
+
+                  `actor` is a film credit on a soundtrack. It appears here, and
+                  it deliberately does NOT make the song part of that person's
+                  discography: `GET /artists/{id}/songs` excludes it.
+              role_label:
+                type: string
+                description: How the role reads in a credits list, e.g. "Lyricist".
+                example: Lyricist
+              artist:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  name: { type: string }
 
     PlaylistVisibility:
       type: string

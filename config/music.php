@@ -65,6 +65,21 @@ return [
         'window_days' => 7,
         'half_life_hours' => 48,
         'limit' => 50,
+
+        /*
+        | "Top songs today" is a different question from "trending", and it was
+        | previously answered with the trending list — a 7-day decayed score
+        | presented under a heading that says today. That is wrong in the one
+        | direction that matters: on a quiet morning it shows yesterday's chart
+        | as though it were this morning's.
+        |
+        | So the daily chart is counted, not decayed: plays since local midnight,
+        | one song one rank. `min_today` is the point below which a day is too
+        | thin to call a chart at all — under it, TrendingService answers with
+        | the weekly list and says so, rather than promoting three plays to a
+        | "top songs today" shelf.
+        */
+        'min_today' => 4,
     ],
 
     /*
@@ -80,6 +95,23 @@ return [
     'history' => [
         'dedupe_window_minutes' => 5,
         'retention_days' => 365,
+
+        /*
+        | How much of a track has to be heard before it counts as a play.
+        |
+        | Without this, skipping through an album logged a play per track the
+        | instant each one started, and every chart derived from this table
+        | measured skipping rather than listening. 30 seconds is the industry
+        | convention (it is what royalty reporting uses); the percentage clause
+        | keeps short tracks reachable, since a 45-second interlude can never
+        | accumulate 30 seconds without being played nearly whole.
+        |
+        | The client stops sending below the threshold and the server rejects
+        | anything that arrives below it anyway — a play count is not something
+        | to take a client's word for.
+        */
+        'min_play_seconds' => 30,
+        'min_play_fraction' => 0.5,
     ],
 
     /*

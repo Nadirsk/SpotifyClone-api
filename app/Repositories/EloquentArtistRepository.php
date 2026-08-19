@@ -65,12 +65,20 @@ final class EloquentArtistRepository implements ArtistRepository
             ->get();
     }
 
+    /**
+     * The artist page's Popular shelf.
+     *
+     * Scoped through {@see Song::scopeCreditedTo()}, the same definition the
+     * paginated song list uses. Sharing it is the point: while this said
+     * `where artist_id` and the list said something wider, the shelf and the
+     * list below it were two different answers to one question.
+     */
     public function popularSongs(Artist $artist, int $limit): Collection
     {
         /** @var Collection<int, Song> */
         return Song::query()
             ->with(EloquentSongRepository::RELATIONS)
-            ->where('artist_id', $artist->getKey())
+            ->creditedTo((string) $artist->getKey())
             ->orderByDesc('popularity')
             ->orderBy('id')
             ->limit($limit)

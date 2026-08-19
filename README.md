@@ -230,3 +230,40 @@ Measured against the live API — these bound completeness and are not bugs:
 Search is therefore a *seed* for discovery, not the road to completeness — the
 records past its depth limit are reached through discographies, album
 tracklists and playlists, all of which page honestly.
+
+### Catalog repair commands
+
+The crawler's job is discovery; these fix things a *previous* version of the
+sync path got wrong, or fill in what a search-sourced record cannot know. All of
+them are re-runnable, none deletes a song, and the three that talk to the
+provider need the local wrapper running.
+
+| Command | What it fixes | Provider calls |
+|---|---|---|
+| `catalog:backfill-credits` | Populates `song_credits` for songs synced before that table existed. Songs are batched 50 provider IDs per request, so the whole catalog is ~730 calls. | yes |
+| `catalog:repair-display-artists` | Relabels songs whose `artist_id` is the lyricist or composer rather than the singer. Reads only stored credits — run `backfill-credits` first. | no |
+| `catalog:repair-tracklists` | Re-fetches album tracklists to fix duplicate `track_number` values (`--scope=duplicates`, the default) or to fill in the ~86% that are null because the song was found by search (`--scope=missing`). | yes |
+| `catalog:split-merged-albums` | Un-merges albums holding several languages. A film soundtrack is released once per language under the *same* title, and title-based dedup welded them into one row — "M.S. Dhoni - The Untold Story" held 27 tracks across four languages. | no |
+| `catalog:enrich-artists` | Fills bio/image/popularity for artists that exist only as a bare-name stub from a song or album sync. | yes |
+| `catalog:parse-soundtracks` | Extracts `film_title` out of song titles. | no |
+
+Order matters for two of them: `repair-display-artists` reads what
+`backfill-credits` writes, and both are cheaper to run after the crawl has
+settled than during it.
+
+Every one takes `--limit` and most take `--dry-run`. Use the dry run — several
+of these move data between rows, and the summary tells you how much before it
+does.
+
+#### An artist's songs is now a credits query
+
+`GET /artists/{id}/songs` returns everything an artist is credited on in a music
+role, not only the songs whose display artist is them. A music director's page
+went from 17 songs to 51; a lyricist's from 67 to 452. `starring` credits are
+stored and excluded from that query — a film actor did not make the music.
+
+`song_credits` is maintained as a complete superset of `songs.artist_id`, which
+is what lets the query be one indexed lookup instead of an `OR` across two
+access paths (measured: 1,078ms → 66ms on the artist endpoint). `SongObserver`
+keeps that invariant true on every song write, so a factory-made song in a test
+has it too.
