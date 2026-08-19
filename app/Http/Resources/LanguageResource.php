@@ -22,6 +22,10 @@ final class LanguageResource extends JsonResource
             'id' => $this->id,
             'name' => $this->name,
             'code' => $this->code,
+            /* Derived by TaxonomyService — see GenreResource for why these are
+               omitted rather than zeroed when absent. */
+            'song_count' => $this->whenNotNull($this->song_count),
+            'cover_image' => $this->whenNotNull($this->cover_image),
         ];
     }
 }

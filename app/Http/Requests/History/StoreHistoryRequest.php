@@ -33,6 +33,14 @@ final class StoreHistoryRequest extends FormRequest
                 Rule::exists('songs', 'id')->whereNull('deleted_at'),
             ],
             'ms_played' => ['nullable', 'integer', 'min:0'],
+            /*
+             | Opaque, client-generated, and only consulted for a signed-out
+             | listener — it identifies a browser for the dedupe window, nothing
+             | more. Bounded to the column width; a caller that sends anything
+             | else simply gets an undeduplicated guest play, not an error, so
+             | length is the only thing worth validating.
+             */
+            'session_id' => ['nullable', 'string', 'max:64'],
         ];
     }
 
@@ -46,5 +54,12 @@ final class StoreHistoryRequest extends FormRequest
         $value = $this->validated('ms_played');
 
         return $value === null ? null : (int) $value;
+    }
+
+    public function sessionId(): ?string
+    {
+        $value = $this->validated('session_id');
+
+        return is_string($value) && trim($value) !== '' ? trim($value) : null;
     }
 }

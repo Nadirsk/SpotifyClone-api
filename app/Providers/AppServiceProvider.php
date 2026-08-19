@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Providers;
 
 use App\Models\User;
+use App\Services\Catalog\AudioAccess;
 use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
@@ -16,7 +17,14 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        //
+        /*
+         | Scoped, not a plain singleton: it memoises the caller's plan ceiling,
+         | which is per-request state. A `singleton` would leak one listener's
+         | entitlement into the next request under a long-lived worker (Octane),
+         | which for this particular class means serving premium URLs to a free
+         | account.
+         */
+        $this->app->scoped(AudioAccess::class);
     }
 
     public function boot(): void
@@ -50,7 +58,7 @@ class AppServiceProvider extends ServiceProvider
 
         /*
          | Belt-and-braces on top of OtpService's own per-phone lockout
-         | (5-10 attempts per 10 minutes there): this one is by IP, so a
+         | (3 sends per 5 minutes, 5 verifies per 10 there): this one is by IP, so a
          | script rotating through phone numbers from one machine still hits
          | a wall, and it is cheap enough to check before OtpService ever
          | touches the database or the SMS vendor.

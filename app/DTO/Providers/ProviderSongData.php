@@ -27,6 +27,12 @@ final readonly class ProviderSongData
      *                                   written from, and these are what make the discovery closure
      *                                   recursive — a song reached from anywhere hands the crawler every
      *                                   artist behind it.
+     * @param  list<ProviderArtistCredit>  $credits  Every artist the provider credits, with the role it credits
+     *                                               them in. Unlike `$artistIds` — which is the same set of
+     *                                               people reduced to bare IDs for the crawler to walk — these
+     *                                               ARE persisted, into `song_credits`. They are what lets a
+     *                                               composer's or a featured vocalist's page list the work they
+     *                                               are actually on, which one `artist_id` column cannot express.
      * @param  int|null  $playCount  The provider's raw counter, unscaled. Distinct from `$popularity`, which
      *                               is that same number squashed into the schema's 0–100 column.
      * @param  int|null  $trackNumber  Position on its album, 1-based. Null from every search result, and that
@@ -51,6 +57,7 @@ final readonly class ProviderSongData
         public ?string $externalUrl = null,
         public ?string $albumId = null,
         public array $artistIds = [],
+        public array $credits = [],
         public ?int $playCount = null,
         public ?string $label = null,
         public ?string $copyright = null,
@@ -91,6 +98,14 @@ final readonly class ProviderSongData
      * when its album's tracklist arrived afterwards, and the position would be
      * discarded unwritten. That is exactly how the whole column ended up null.
      *
+     * `credits` IS folded in, for the same reason `trackNumber` is: the
+     * short-circuit above returns before `writeEntity()` runs, so a provider
+     * that corrects a credit — or a payload shape that starts carrying one it
+     * did not before — would match on checksum and the correction would never
+     * be written. It is safe to include only because the adapter emits credits
+     * in a deterministic order; an unsorted list would rewrite every song on
+     * every refresh as the provider reshuffled its own array.
+     *
      * The cost is that a song reachable both ways alternates between two
      * checksums and is rewritten each time the other path runs. That is one
      * UPDATE per dual-sourced song per full bootstrap, it never loses data
@@ -118,6 +133,7 @@ final readonly class ProviderSongData
             $this->explicit,
             $this->hasLyrics,
             $this->trackNumber,
+            array_map(static fn (ProviderArtistCredit $credit): string => $credit->key(), $this->credits),
         ]));
     }
 }

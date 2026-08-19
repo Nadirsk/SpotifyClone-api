@@ -1,0 +1,37 @@
+Final report
+What was actually broken
+Nothing worked at all when I started. .env pointed at 13306/music_streaming/sohail; MySQL runs on 3306/music_discovery/root. Every catalog endpoint returned HTTP 500, and the frontend hid it (call() swallows failures → empty shelves). Fixed first; the old values are kept commented.
+
+Your 10 bugs → 4 root causes
+Bugs 4, 5, 6 were one line. usePlay enforced the free tier's on_demand_playback entitlement by calling setShuffle(true), replacing your startIndex with Math.floor(Math.random() * items.length), and firing a toast — on every play. Reproduced twice before fixing: clicked "Gehra Hua" → played "Move - Yeh Ishq Ishq"; clicked "Dhurandhar - Title Track" → played "Teri Ni Kararan". Removed. A silent substitution is indistinguishable from a broken player. The entitlement still feeds the plans table; re-gating needs a visible dialog, not a swap.
+
+Bug 7 — premium was decorative. PlaybackService clamped quality on /stream only. SongResource emitted songs.preview_url raw — the top of the ladder (_320.mp4) — so every album, search and shelf payload handed a free account a premium URL. New AudioAccess clamps at that boundary. Free/guest/expired now get _96, Premium gets _320, downloads 402/401. My own test caught a leak here: memoising the ceiling in one slot served a guest's tier to the Premium user behind them — it's keyed by user id now.
+
+Bug 3 — album tracklists changed while browsing. Caught live: the Dhurandhar album showed 11 tracks including "Shararat", which belongs to a different album; minutes later, 10 without it. resolveAlbumForSong rewrote album_id from whatever album name the incoming payload carried, and a search result names a release differently from the tracklist a song sits on. Membership is now authoritative-only (trackNumber present ⇒ it came from a real tracklist), and a legitimate move clears the stale track_number — which is what left 4 tracks all claiming position 1.
+
+Bug 2 — "Top songs today" was a 7-day score. It read trending_score (7-day sum, 48h half-life). New songsToday() counts plays since local midnight; below 4 plays it returns nothing and the shelf retitles itself "Trending this week" rather than lying. history now accepts guest plays (nullable user_id + session_id), and a play only counts past 30s / 50% — client and server both enforce it. Live proof: 7 plays today, exactly one with ms_played=30203, while dozens of few-second test skips recorded nothing.
+
+Bug 1 — dashboard albums. "New releases" was headed by albums dated 2028-01-01 and 2027 (provider year-only metadata → Jan 1). newest now excludes unreleased rows.
+
+Bug 10 — queue survives in-app navigation and a reload now (persisted; restores paused, since autoplay without a gesture is blocked). Bugs 8, 9 were already built — the gaps were Media Session and keyboard shortcuts, both absent, both added.
+
+Found while auditing
+Playlist/profile search never matched — the results page passed the raw encoded route param, so the API got arijit%2520singh.
+Play right after page load was silently dropped (isResolving early-return). Held and replayed now.
+previous() wrapped to the last track with repeat off; repeat announced "Repeat" in all three modes; every shelf title was a bare link so the dashboard had no heading outline; openapi.yaml didn't parse (malformed inline YAML at line 888).
+Verification
+Backend suite	331 passed (was 307; +24 new: AudioAccess, DailyChart, sync membership, history threshold, bypass fixture)
+Player + dashboard, Chromium	25/25
+Premium matrix + library, Chromium	21/21
+player-integrity.spec.ts (new)	12/12
+typecheck / lint	clean (5 pre-existing warnings, none in touched files)
+Premium matrix all four rows: free+free, free+premium, premium+premium, expired+premium.
+
+Two things to know
+I restarted your MySQL, artisan serve and npm run dev — the previous process exited and took them down mid-session. Catalog intact (36,471 songs).
+The full 51-test e2e suite is flaky on this box, not broken. php artisan serve serves one request at a time (measured: 0.5s alone, 8 concurrent → 4.3s) while every page fires ~6 background queries. Best full run was 47/51; every failure passed alone. I removed networkidle waits, raised the timeout to 150s, and documented it in playwright.config.ts. For CI, run the API behind php-fpm.
+Not done, deliberately
+Featured-artist credits. Artist→song mapping is correct (verified: Shashwat Sachdev returns his 19 credited songs, not the 78 on his albums) but narrow — the schema has one artist_id per song. A credits pivot needs re-crawling 33k songs through a rate-limited provider. Say the word and I'll do the schema + sync so it's right going forward.
+75 albums (0.24%) still have duplicate track numbers from the old sync. Only a provider re-fetch of those tracklists can recover true order; the bug that created them is fixed.
+Your account holds 500 playlists (the cap) — worth pruning, it makes every page load heavy.
+Nothing is committed — git isn't initialised here, so all changes are sitting in the working tree for you to stage.

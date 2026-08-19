@@ -8,6 +8,7 @@ use App\DTO\CatalogQuery;
 use App\Enums\SortOrder;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Carbon;
 
 /**
  * Translates a CatalogQuery into `where` clauses and ordering.
@@ -122,7 +123,20 @@ trait AppliesCatalogFilters
 
         $sorted = match ($query->sort) {
             SortOrder::Newest => $hasReleaseDate
-                ? $builder->orderByDesc('release_date')
+                /*
+                 | Unreleased rows are excluded, not merely ranked. Provider
+                 | metadata that supplies only a year becomes January 1st of that
+                 | year, and a few rows carry a year that has not happened yet —
+                 | 2027, 2028. Ordered by `release_date DESC` those sat at the
+                 | head of the home page's "New releases" shelf, ahead of records
+                 | genuinely released this week, which is what that shelf was
+                 | reported as getting wrong.
+                 |
+                 | Excluding rather than clamping is the honest reading: whatever
+                 | the bad date means, an album the catalog believes is not out
+                 | yet is not a new release.
+                 */
+                ? $builder->whereDate('release_date', '<=', Carbon::today())->orderByDesc('release_date')
                 : $builder->orderByDesc('created_at'),
             SortOrder::Oldest => $hasReleaseDate
                 ? $builder->orderBy('release_date')

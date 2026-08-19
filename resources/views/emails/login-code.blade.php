@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{ $code }} – your Resonance login code</title>
+<title>{{ $code }} – your {{ config('app.name') }} login code</title>
 </head>
 {{--
     Plain inline styles throughout, no <style> block: this is read inside
@@ -20,7 +20,7 @@
         <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:8px; padding:40px;">
           <tr>
             <td style="font-size:22px; font-weight:800; color:#1ed760; letter-spacing:-0.02em; padding-bottom:32px;">
-              Resonance
+              {{ config('app.name') }}
             </td>
           </tr>
           <tr>
@@ -51,7 +51,7 @@
           <tr>
             <td style="font-size:14px; color:#191414; line-height:1.6;">
               Best regards,<br>
-              Resonance
+              {{ config('app.name') }}
             </td>
           </tr>
         </table>

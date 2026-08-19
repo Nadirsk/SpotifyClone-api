@@ -44,19 +44,33 @@ final class HistoryController extends Controller
         );
     }
 
-    /** POST /history */
+    /**
+     * POST /history
+     *
+     * The one write on this controller that is not authenticated: a signed-out
+     * listener's plays count too, or the charts built on this table describe
+     * subscribers while claiming to describe listening. A guest is identified by
+     * the request's opaque `session_id`.
+     */
     public function store(StoreHistoryRequest $request): JsonResponse
     {
+        $user = $request->user();
+
         $entry = $this->history->record(
-            $this->user($request),
+            $user instanceof User ? $user : null,
             $request->songId(),
             $request->msPlayed(),
+            $request->sessionId(),
         );
 
         if ($entry === null) {
-            // Inside the dedupe window. The client did nothing wrong, so this
-            // is a success — the play simply was not logged a second time.
-            return $this->respondSuccess(null, 'Play already recorded recently');
+            /*
+             | Either inside the dedupe window or below the listen threshold.
+             | The client did nothing wrong in either case — it is reporting
+             | honestly and the play simply does not count — so this is a
+             | success, not a 4xx.
+             */
+            return $this->respondSuccess(null, 'Play not counted');
         }
 
         return $this->respondCreated(new HistoryResource($entry), 'Play recorded');

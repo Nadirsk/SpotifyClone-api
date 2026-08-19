@@ -22,6 +22,13 @@ final class GenreResource extends JsonResource
             'id' => $this->id,
             'name' => $this->name,
             'slug' => $this->slug,
+            /*
+             | Derived by TaxonomyService, not columns. Omitted rather than
+             | zeroed when absent: a genre nested on a song has not been
+             | counted, and reporting `0` there would read as "no songs".
+             */
+            'song_count' => $this->whenNotNull($this->song_count),
+            'cover_image' => $this->whenNotNull($this->cover_image),
         ];
     }
 }

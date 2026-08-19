@@ -39,10 +39,28 @@ final class OtpService
 
     private const SEND_MAX_ATTEMPTS = 3;
 
-    private const SEND_DECAY_SECONDS = 600;
+    /**
+     * 5 minutes, matching EmailLoginCodeService — the two send windows are
+     * kept in lockstep so "how long am I locked out for" has one answer
+     * whichever way the visitor signed in.
+     *
+     * The window runs from the first send, not the last (Laravel's
+     * RateLimiter does not extend the TTL on later hits), so three sends in
+     * quick succession lock the number for the rest of it. Note the tension
+     * here that the email side does not have: every send, bypass number
+     * included, bills a real SMS credit, so this window is the main thing
+     * standing between a resend button and a bill. 5 minutes was chosen
+     * deliberately over 10; if abuse shows up, this is the number to raise.
+     */
+    private const SEND_DECAY_SECONDS = 300;
 
     private const VERIFY_MAX_ATTEMPTS = 5;
 
+    /**
+     * Left at 10 minutes, as on the email side: this is the brake on guessing
+     * a live 6-digit code, so its cost falls on an attacker, not on someone
+     * who already has the SMS in hand.
+     */
     private const VERIFY_DECAY_SECONDS = 600;
 
     private const THROTTLED = 'Too many attempts. Please try again later.';
@@ -57,8 +75,8 @@ final class OtpService
 
     /**
      * @throws ValidationException On lockout or a vendor-side send failure —
-     *                              both are things the caller must show the
-     *                              visitor, not swallow.
+     *                             both are things the caller must show the
+     *                             visitor, not swallow.
      */
     public function send(string $phone): void
     {
@@ -95,11 +113,11 @@ final class OtpService
 
     /**
      * @throws ValidationException On lockout or a wrong/expired code. The two
-     *                              share one message deliberately — telling
-     *                              a caller "no code was ever sent to this
-     *                              number" versus "wrong code" would let a
-     *                              phone-number guessing script fish for
-     *                              which numbers have a pending OTP at all.
+     *                             share one message deliberately — telling
+     *                             a caller "no code was ever sent to this
+     *                             number" versus "wrong code" would let a
+     *                             phone-number guessing script fish for
+     *                             which numbers have a pending OTP at all.
      */
     public function verify(string $phone, string $code): void
     {

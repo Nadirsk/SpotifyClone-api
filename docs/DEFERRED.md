@@ -113,3 +113,54 @@ mode, desktop/mobile apps, social sharing, collaborative playlists, lyrics.
 
 The `/recommendations` endpoints in `05_API_SPECIFICATION` §12 are Phase 2. They
 are not implemented.
+
+---
+
+## 6. Catalog integrity: what is repaired, and what is left
+
+The sync path wrote some things wrong before it was fixed, and the repair
+commands in the README's "Catalog repair commands" table undo most of it. What
+they cannot reach is listed here so a later reader does not mistake a known
+residue for an unnoticed bug.
+
+**Track positions on 14 albums (0.04%) are still duplicated.** Down from 75.
+`catalog:repair-tracklists` renumbered 218 tracks across 64 albums from the
+provider's own tracklists, and `catalog:split-merged-albums` cleared 3 more by
+un-welding language releases. The remainder splits two ways: 5 albums have no
+`provider_album_mappings` row, so there is no tracklist to ask for; the other 9
+are title-collision compilations ("Indian Pop", "Vishal Mishra Bollywood Hits")
+holding songs the provider's tracklist for that album does not contain. Their
+*membership* is wrong, not their ordering, and reassigning membership is
+deliberately not something the ordering command does — that write is what caused
+the original damage and now belongs solely to the guarded path in
+`SyncService::withStableAlbumMembership()`.
+
+**31,509 songs on an album have no `track_number` at all** (86% of songs that
+have an album). Not damage: a song search returns songs with no album context,
+so the position is unknowable from that payload — see
+`ProviderSongData::$trackNumber`. Most of this catalog was discovered by search.
+`catalog:repair-tracklists --scope=missing` fixes it at one provider call per
+album, which is ~21,300 calls and roughly 1.5 hours against the local wrapper.
+Not run. Until it is, album pages fall back to insertion order, which is what
+`EloquentSongRepository::forAlbum()` already sorts by.
+
+**333 albums still hold more than one language.** `catalog:split-merged-albums`
+moved 851 tracks into 106 sibling albums, but leaves any language group smaller
+than `--min-tracks=3` where it is: 466 tracks sit in groups of one or two, where
+a sibling album holding a single track is arguably worse than the mix. Lower the
+threshold to split them.
+
+**Credits depend on one provider.** `song_credits` has no provider column, and
+`CreditWriter` replaces a song's whole credit list when it writes. That is
+correct while JioSaavn is the only adapter that parses credits, and would need
+the column before a second one did — otherwise the two would take turns deleting
+each other's work. Noted rather than built, since an unused column is its own
+kind of wrong.
+
+**Featured-artist credits are now stored, and the API publishes them, but no UI
+shows them.** `GET /songs/{id}` returns a `credits` array with normalized roles;
+the frontend type exists (`SongCredit` in `types/api.ts`). A credits block on the
+track menu or the now-playing panel is unbuilt UI work, not a data gap. Note that
+`tests/e2e/bug-fixes.spec.ts` currently asserts "View credits" is *absent* from
+the track menu — it was removed as a dead entry — so building the panel means
+updating that expectation.

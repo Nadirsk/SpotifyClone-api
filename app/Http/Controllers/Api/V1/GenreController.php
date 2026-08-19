@@ -6,20 +6,22 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\GenreResource;
-use App\Models\Genre;
 use App\Services\Cache\CacheService;
+use App\Services\Catalog\TaxonomyService;
 use App\Traits\ApiResponse;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\JsonResponse;
 
 /**
  * Genre reference list, used to populate the filter dropdown in
- * 05_API_SPECIFICATION §16.
+ * 05_API_SPECIFICATION §16 and the Browse grid.
  *
- * Genres are immutable reference data with no filtering, sorting or pagination,
- * so this reads the model directly instead of carrying a service and repository
- * that would both be one-line pass-throughs. If genre ever grows behaviour, it
- * gets the full stack like every other entity.
+ * This used to read the model directly, on the grounds that a genre was a bare
+ * name with no behaviour worth a service. It has behaviour now: each row also
+ * reports how many songs are in it and one real cover to show for it, which is
+ * what lets a client tell a genre with a catalog behind it from an empty one.
+ * That derivation lives in TaxonomyService, per this file's own former note
+ * that genre gets the full stack the moment it stops being a pass-through.
  */
 final class GenreController extends Controller
 {
@@ -27,6 +29,7 @@ final class GenreController extends Controller
 
     public function __construct(
         private readonly CacheService $cache,
+        private readonly TaxonomyService $taxonomy,
     ) {}
 
     /**
@@ -38,8 +41,8 @@ final class GenreController extends Controller
         // change no more often than the song catalog does.
         $genres = $this->cache->remember(
             'song',
-            'genres:all',
-            static fn (): Collection => Genre::query()->orderBy('name')->get(),
+            'genres:all:v2',
+            fn (): Collection => $this->taxonomy->genres(),
         );
 
         return $this->respondSuccess(GenreResource::collection($genres));

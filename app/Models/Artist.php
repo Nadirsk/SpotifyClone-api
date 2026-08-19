@@ -57,7 +57,16 @@ class Artist extends Model
         return $this->hasMany(Album::class);
     }
 
-    /** @return HasMany<Song, $this> */
+    /**
+     * Songs whose *display* artist is this one.
+     *
+     * Narrower than the artist's actual discography, and deliberately so: this
+     * is the right relation for anything that means "rows labelled with this
+     * name". For everything they are credited on — as singer, composer,
+     * lyricist or guest — use {@see Song::scopeCreditedTo()}.
+     *
+     * @return HasMany<Song, $this>
+     */
     public function songs(): HasMany
     {
         return $this->hasMany(Song::class);

@@ -65,17 +65,16 @@ final class AuthController extends Controller
     }
 
     /**
-     * Fixed response regardless of whether the address has an account —
-     * same anti-enumeration shape as `forgotPassword()` below.
+     * A 200 here now means a code really was sent — an address with no
+     * account gets a 422 instead, unlike `forgotPassword()` below which
+     * keeps its fixed anti-enumeration response. See
+     * EmailLoginCodeService::send() for why the two differ.
      */
     public function sendEmailLoginCode(SendEmailLoginCodeRequest $request): JsonResponse
     {
         $this->auth->sendEmailLoginCode((string) $request->validated('email'));
 
-        return $this->respondSuccess(
-            null,
-            'If an account exists for that email, a login code has been sent.',
-        );
+        return $this->respondSuccess(null, 'Code sent.');
     }
 
     public function verifyEmailLoginCode(VerifyEmailLoginCodeRequest $request): JsonResponse

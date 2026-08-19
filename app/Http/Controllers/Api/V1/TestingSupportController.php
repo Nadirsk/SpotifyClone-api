@@ -6,20 +6,30 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Enums\SubscriptionStatus;
 use App\Http\Controllers\Controller;
+use App\Models\PhoneOtp;
 use App\Models\Subscription;
 use App\Models\User;
 use App\Traits\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
  * Test-only fixtures for the browser E2E suite.
  *
  * **Never routed in production.** The route group in `routes/api.php` is wrapped
  * in an environment check, so these endpoints do not exist outside `local` and
- * `testing`. They are still authenticated and still act only on the caller's own
- * account — an escaped route would be an embarrassment, not a breach.
+ * `testing`.
+ *
+ * `resetSubscription` is authenticated and acts only on the caller's own account
+ * — an escaped route would be an embarrassment, not a breach.
+ * `verifyBypassPhone` cannot be authenticated, because its whole purpose is to
+ * run *before* a token exists; it is instead narrowed to refuse every number
+ * except the configured OTP-bypass one, and it issues no token of its own. See
+ * its own docblock.
  *
  * ## Why this exists rather than the suite using the real endpoints
  *
@@ -50,6 +60,68 @@ final class TestingSupportController extends Controller
             ]);
 
         return $this->respondSuccess(['expired' => $expired], 'Subscriptions reset');
+    }
+
+    /**
+     * POST /testing/verify-bypass-phone
+     *
+     * Marks the OTP-bypass phone as verified, so `POST /auth/login/phone` will
+     * accept it — without sending an SMS.
+     *
+     * ## Why the E2E suite needs this
+     *
+     * Signing in by phone needs a *verified* number
+     * (`OtpService::wasRecentlyVerified`), and verifying needs a pending
+     * `phone_otps` row, which only `OtpService::send()` creates. That method
+     * really does call the vendor: the bypass number keeps a fixed code so a
+     * tester knows it without reading the SMS, but the message is still sent,
+     * still costs a credit, and is capped at three per five minutes. A test suite
+     * that mints its session that way bills real money per run and locks itself
+     * out on the fourth one.
+     *
+     * This writes the row the flow is missing and nothing else.
+     *
+     * ## Why it is safe to be unauthenticated
+     *
+     * It has to be — there is no token yet. What keeps it narrow:
+     *
+     * - it exists only outside production, like everything else here;
+     * - it refuses any number other than `services.textsms.bypass_phone`, and
+     *   404s when no bypass number is configured at all, so it cannot be pointed
+     *   at a real listener's phone;
+     * - it returns no token and creates no account. It grants exactly what
+     *   knowing the bypass code already grants, to a caller who must already know
+     *   the bypass number.
+     */
+    public function verifyBypassPhone(Request $request): JsonResponse
+    {
+        $bypass = config('services.textsms.bypass_phone');
+
+        if (! is_string($bypass) || $bypass === '') {
+            throw new NotFoundHttpException('No bypass phone is configured.');
+        }
+
+        $phone = (string) $request->input('phone', $bypass);
+
+        if (! hash_equals($bypass, $phone)) {
+            throw new NotFoundHttpException('That is not the bypass phone.');
+        }
+
+        /*
+         | Written as already-verified rather than sent-then-verified: the code is
+         | never checked here, so hashing the bypass value into `otp_hash` would
+         | be storing a credential for no reason. A fresh row each time, because
+         | `wasRecentlyVerified` reads `verified_at` against a 30-minute window.
+         */
+        PhoneOtp::query()->create([
+            'phone' => $bypass,
+            'otp_hash' => Hash::make(Str::random(32)),
+            'type' => 'signup',
+            'expires_at' => Carbon::now()->addMinutes(30),
+            'verified_at' => Carbon::now(),
+        ]);
+
+        return $this->respondSuccess(null, 'Bypass phone marked verified');
     }
 
     private function user(Request $request): User

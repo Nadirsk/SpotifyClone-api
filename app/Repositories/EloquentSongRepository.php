@@ -24,6 +24,19 @@ final class EloquentSongRepository implements SongRepository
      */
     public const RELATIONS = ['artist', 'album', 'genre', 'language'];
 
+    /**
+     * What a single song's own endpoint loads on top of {@see RELATIONS}.
+     *
+     * Credits are deliberately not in RELATIONS. A tracklist or a search page
+     * serialises up to fifty songs and none of them shows a credits block, so
+     * loading four or five credit rows and their artists per song would be
+     * hundreds of rows fetched to be thrown away. `GET /songs/{id}` is the one
+     * place a full credits list is asked for, and it is one song.
+     *
+     * @var list<string>
+     */
+    public const DETAIL_RELATIONS = ['credits.artist'];
+
     public function paginate(CatalogQuery $query): LengthAwarePaginator
     {
         /** @var LengthAwarePaginator<int, Song> */
@@ -34,7 +47,7 @@ final class EloquentSongRepository implements SongRepository
     public function findOrFail(string $id): Song
     {
         /** @var Song */
-        return $this->baseQuery()->findOrFail($id);
+        return $this->baseQuery()->with(self::DETAIL_RELATIONS)->findOrFail($id);
     }
 
     public function related(Song $song, int $limit): Collection
@@ -81,11 +94,26 @@ final class EloquentSongRepository implements SongRepository
             ->get();
     }
 
+    /**
+     * Everything an artist is credited on, not only what they are labelled with.
+     *
+     * This used to be `where('artist_id', $artistId)` — the display artist and
+     * nothing else. The result was a discography that was accurate and badly
+     * incomplete: a music director's page listed the handful of tracks where the
+     * sync adapter happened to elect them the display name and omitted the rest
+     * of what they had written, and a featured vocalist's page omitted every
+     * guest appearance. Neither could be expressed, because a song row has room
+     * for exactly one artist.
+     *
+     * {@see Song::scopeCreditedTo()} holds the definition, shared with the
+     * artist page's Popular shelf so the two lists cannot disagree about what an
+     * artist's songs are.
+     */
     public function forArtist(string $artistId, CatalogQuery $query): LengthAwarePaginator
     {
         /** @var LengthAwarePaginator<int, Song> */
         return $this->applyCatalogQuery($this->baseQuery(), $query)
-            ->where('artist_id', $artistId)
+            ->creditedTo($artistId)
             ->paginate(perPage: $query->limit, page: $query->page);
     }
 

@@ -29,11 +29,27 @@ final class TrendingController extends Controller
 
     /**
      * GET /api/v1/trending/songs
+     *
+     * `?window=today` asks for the daily chart — plays since local midnight,
+     * counted rather than decayed. Anything else (including no parameter) keeps
+     * the rolling 7-day trending list, so existing clients are unaffected.
+     *
+     * A `today` request can legitimately come back empty: below
+     * `music.trending.min_today` plays there is not enough listening to rank.
+     * The message says which window answered, so a caller can label the list
+     * correctly instead of guessing — the "Top songs today" shelf showing a
+     * weekly ranking was one of the reported bugs.
      */
     public function songs(Request $request): JsonResponse
     {
+        $today = $request->query('window') === 'today';
+        $songs = $today
+            ? $this->trending->songsToday($this->limit($request))
+            : $this->trending->songs($this->limit($request));
+
         return $this->respondSuccess(
-            SongResource::collection($this->trending->songs($this->limit($request))),
+            SongResource::collection($songs),
+            $today ? 'Top songs today' : 'Trending songs',
         );
     }
 

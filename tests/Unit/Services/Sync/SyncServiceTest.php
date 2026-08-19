@@ -11,6 +11,7 @@ use App\Models\Provider;
 use App\Models\ProviderSongMapping;
 use App\Models\Song;
 use App\Services\Catalog\SoundtrackParser;
+use App\Services\Sync\CreditWriter;
 use App\Services\Sync\DeduplicationService;
 use App\Services\Sync\MetadataNormalizer;
 use App\Services\Sync\SyncService;
@@ -38,9 +39,12 @@ class SyncServiceTest extends TestCase
     {
         parent::setUp();
 
+        $normalizer = new MetadataNormalizer(new SoundtrackParser);
+
         $this->syncService = new SyncService(
-            new MetadataNormalizer(new SoundtrackParser),
+            $normalizer,
             new DeduplicationService,
+            new CreditWriter($normalizer),
             app(LoggerInterface::class),
         );
 
@@ -332,5 +336,109 @@ class SyncServiceTest extends TestCase
         $this->assertNull($result);
         $this->assertSame(0, Song::query()->count());
         $this->assertSame(0, ProviderSongMapping::query()->count());
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Album membership stability
+    |--------------------------------------------------------------------------
+    |
+    | An album's tracklist has to be the same tracklist on the next request.
+    | It was not: `album_id` was rewritten from the incoming payload's album
+    | *name* on every sync, and a search result names a release differently
+    | from the tracklist a song actually sits on — so a song moved between
+    | albums depending on which crawl path touched it last, and albums gained
+    | and lost tracks while being browsed.
+    |
+    | `trackNumber` is the authority marker: only `JioSaavnAdapter::albumTracks()`
+    | supplies one. See SyncService::withStableAlbumMembership().
+    */
+
+    public function test_a_search_sourced_sync_cannot_move_a_song_off_the_album_a_tracklist_put_it_on(): void
+    {
+        $provider = Provider::factory()->create();
+        $externalId = 'ext-stable-membership';
+
+        // Reached through the album's own tracklist: position known, so this is
+        // the authoritative statement of where the song lives.
+        $song = $this->syncService->syncSong($provider, $this->songData([
+            'externalId' => $externalId,
+            'title' => 'Shararat',
+            'artist' => 'Madhubanti Bagchi',
+            'album' => 'Dhurandhar',
+            'trackNumber' => 7,
+        ]));
+
+        $this->assertNotNull($song);
+        $albumId = $song->fresh()->album_id;
+        $this->assertNotNull($albumId);
+
+        // The same song turning up in a search, where the provider labels it
+        // with its single release instead. No position, so no authority.
+        $this->syncService->syncSong($provider, $this->songData([
+            'externalId' => $externalId,
+            'title' => 'Shararat',
+            'artist' => 'Madhubanti Bagchi',
+            'album' => 'Shararat (From "Dhurandhar")',
+            'trackNumber' => null,
+            // Something has to differ or the checksum short-circuit skips the write.
+            'popularity' => 71,
+        ]));
+
+        $fresh = $song->fresh();
+        $this->assertSame($albumId, $fresh->album_id, 'a search result must not move a song off its album');
+        $this->assertSame(7, $fresh->track_number, 'nor discard the position the tracklist established');
+        $this->assertSame(71, $fresh->popularity, 'while everything else it does know still merges');
+    }
+
+    public function test_an_authoritative_move_reassigns_the_album_and_clears_the_stale_position(): void
+    {
+        $provider = Provider::factory()->create();
+        $externalId = 'ext-authoritative-move';
+
+        $song = $this->syncService->syncSong($provider, $this->songData([
+            'externalId' => $externalId,
+            'album' => 'First Album',
+            'trackNumber' => 3,
+        ]));
+
+        $this->assertNotNull($song);
+        $first = $song->fresh()->album_id;
+
+        // Another album's tracklist claims it, at a different position. This one
+        // does have standing, so the move goes through.
+        $this->syncService->syncSong($provider, $this->songData([
+            'externalId' => $externalId,
+            'album' => 'Second Album',
+            'trackNumber' => 9,
+        ]));
+
+        $fresh = $song->fresh();
+        $this->assertNotSame($first, $fresh->album_id);
+        $this->assertSame(9, $fresh->track_number, 'the new album'.'"'.'s position, not the old one');
+    }
+
+    public function test_a_search_sourced_sync_still_attaches_a_song_that_has_no_album_yet(): void
+    {
+        $provider = Provider::factory()->create();
+        $externalId = 'ext-first-attachment';
+
+        $song = $this->syncService->syncSong($provider, $this->songData([
+            'externalId' => $externalId,
+            'album' => null,
+        ]));
+
+        $this->assertNotNull($song);
+        $this->assertNull($song->fresh()->album_id);
+
+        // Nothing is being overwritten, so a search result is welcome to supply
+        // the first album this song has ever had.
+        $this->syncService->syncSong($provider, $this->songData([
+            'externalId' => $externalId,
+            'album' => 'Discovered By Search',
+            'trackNumber' => null,
+        ]));
+
+        $this->assertNotNull($song->fresh()->album_id);
     }
 }

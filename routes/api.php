@@ -176,6 +176,9 @@ Route::middleware('auth:sanctum')->get('recommendations', [RecommendationControl
 
 Route::get('genres', [GenreController::class, 'index']);
 Route::get('languages', [LanguageController::class, 'index']);
+// Grouped so `/popular-by-country` is one request rather than one per language;
+// the fan-out version tripped the guest rate limit on every page load.
+Route::get('languages/popular-albums', [LanguageController::class, 'popularAlbums']);
 
 /*
 |--------------------------------------------------------------------------
@@ -310,10 +313,35 @@ Route::middleware('auth:sanctum')->prefix('notifications')->group(function (): v
 */
 
 if (! app()->environment('production')) {
-    Route::middleware('auth:sanctum')->prefix('testing')->group(function (): void {
-        Route::post('reset-subscription', [TestingSupportController::class, 'resetSubscription']);
+    Route::prefix('testing')->group(function (): void {
+        Route::middleware('auth:sanctum')->post(
+            'reset-subscription',
+            [TestingSupportController::class, 'resetSubscription'],
+        );
+
+        /*
+         | Unauthenticated of necessity — it runs before a token exists — and
+         | narrowed to the configured OTP-bypass number, which it refuses to
+         | deviate from. It exists so the browser suite can sign in by phone
+         | without `OtpService::send()` billing a real SMS on every run. See
+         | TestingSupportController::verifyBypassPhone().
+         */
+        Route::post('verify-bypass-phone', [TestingSupportController::class, 'verifyBypassPhone']);
     });
 }
+
+/*
+ | Recording a play is deliberately outside the auth group below: a signed-out
+ | listener can play the catalog, so their plays have to count too, or every
+ | chart derived from `history` measures only subscribers while claiming to
+ | measure listening. The caller is still resolved when a token is present
+ | (default guard is `sanctum`), and a guest is identified by the opaque
+ | `session_id` in the body — see the add_anonymous_play_tracking migration.
+ |
+ | Reading and clearing history stay authenticated: those are a person's own
+ | feed, and a session id is not an authentication factor.
+ */
+Route::post('history', [HistoryController::class, 'store']);
 
 Route::middleware('auth:sanctum')->group(function (): void {
     Route::get('favorites', [FavoriteController::class, 'index']);
@@ -322,7 +350,6 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::delete('favorites/{song}', [FavoriteController::class, 'destroy']);
 
     Route::get('history', [HistoryController::class, 'index']);
-    Route::post('history', [HistoryController::class, 'store']);
     Route::delete('history', [HistoryController::class, 'destroy']);
 
     Route::get('profile', [ProfileController::class, 'show']);
