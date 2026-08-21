@@ -7,10 +7,14 @@ use App\Http\Controllers\Api\V1\ArtistController;
 use App\Http\Controllers\Api\V1\ArtistFollowController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\ConcertController;
+use App\Http\Controllers\Api\V1\DeviceSessionController;
 use App\Http\Controllers\Api\V1\FavoriteController;
 use App\Http\Controllers\Api\V1\GenreController;
 use App\Http\Controllers\Api\V1\HistoryController;
 use App\Http\Controllers\Api\V1\LanguageController;
+use App\Http\Controllers\Api\V1\ListeningRoomController;
+use App\Http\Controllers\Api\V1\ListeningRoomPlaybackController;
+use App\Http\Controllers\Api\V1\ListeningRoomQueueController;
 use App\Http\Controllers\Api\V1\NotificationController;
 use App\Http\Controllers\Api\V1\OtpController;
 use App\Http\Controllers\Api\V1\PlanController;
@@ -85,9 +89,28 @@ Route::prefix('auth')->group(function (): void {
     Route::post('login/email/verify-code', [AuthController::class, 'verifyEmailLoginCode'])
         ->middleware('throttle:email-login-verify');
 
+    /*
+     | Device sessions — the per-plan cap on how many machines may hold a live
+     | token at once (`config/plans.php` → `max_sessions`).
+     |
+     | `sessions/resolve` is deliberately outside the auth group below: it is
+     | the second half of a login that came back 409 because the account was
+     | full, so by definition the caller has no token yet. Its credential is the
+     | single-use `resolution_token` from that 409 — see
+     | SessionLimitReachedException. Registered before the `{session}` route so
+     | the numeric wildcard cannot swallow it.
+     */
+    Route::post('sessions/resolve', [AuthController::class, 'resolveSessionConflict']);
+
     Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('logout', [AuthController::class, 'logout']);
         Route::get('me', [AuthController::class, 'me']);
+
+        Route::get('sessions', [DeviceSessionController::class, 'index']);
+        // Sign out every device except this one — the "secure my account" button.
+        Route::delete('sessions', [DeviceSessionController::class, 'destroyOthers']);
+        Route::delete('sessions/{session}', [DeviceSessionController::class, 'destroy'])
+            ->whereNumber('session');
     });
 });
 
@@ -356,4 +379,44 @@ Route::middleware('auth:sanctum')->group(function (): void {
     Route::put('profile', [ProfileController::class, 'update']);
     Route::put('profile/avatar', [ProfileController::class, 'updateAvatar']);
     Route::delete('profile', [ProfileController::class, 'destroy']);
+});
+
+/*
+|--------------------------------------------------------------------------
+| Listen Together
+|--------------------------------------------------------------------------
+|
+| Rooms are addressed by their shareable code rather than by id, so the URL a
+| listener is looking at and the URL the API is called with carry the same
+| string. Codes are matched case-insensitively (ListeningRoomService).
+|
+| Everything here is authenticated: playback state is not public, and a room is
+| membership even to look at. `preview` is the one endpoint a non-member may
+| call, because it is what an invite link opens to before joining.
+|
+| The host-only writes live in their own two controllers so the authorization
+| split is visible here rather than buried in method bodies. Ordering rule as
+| everywhere else in this file: literal segments before the wildcard that would
+| otherwise swallow them.
+|
+| There is no endpoint for "what is playing right now" beyond GET {code}: that
+| response IS the authoritative state, and it is what a client resyncs against
+| after a dropped connection. Everything else arrives over the room channel.
+|
+*/
+
+Route::middleware('auth:sanctum')->prefix('listening-rooms')->group(function (): void {
+    Route::post('/', [ListeningRoomController::class, 'store']);
+
+    Route::get('{code}/preview', [ListeningRoomController::class, 'preview']);
+    Route::get('{code}', [ListeningRoomController::class, 'show']);
+
+    Route::post('{code}/join', [ListeningRoomController::class, 'join']);
+    Route::post('{code}/leave', [ListeningRoomController::class, 'leave']);
+
+    Route::post('{code}/playback', [ListeningRoomPlaybackController::class, 'update']);
+
+    Route::put('{code}/queue', [ListeningRoomQueueController::class, 'replace']);
+    Route::post('{code}/queue', [ListeningRoomQueueController::class, 'store']);
+    Route::delete('{code}/queue/{item}', [ListeningRoomQueueController::class, 'destroy']);
 });

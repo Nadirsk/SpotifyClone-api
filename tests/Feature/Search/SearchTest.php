@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature\Search;
 
+use App\Models\Album;
 use App\Models\Artist;
 use App\Models\Song;
 use Illuminate\Foundation\Testing\DatabaseMigrations;
@@ -161,5 +162,54 @@ final class SearchTest extends TestCase
         $response = $this->getJson('/api/v1/search/suggest');
 
         $response->assertStatus(422)->assertJsonValidationErrors('q');
+    }
+
+    /**
+     * An album row with no tracks behind it is a dead end, not a result — see
+     * `DatabaseSearchEngine::applyFilters()` for where they come from.
+     */
+    public function test_album_search_skips_albums_that_hold_no_tracks(): void
+    {
+        $withTracks = Album::factory()->create(['title' => 'Wwwsearchable Soundtrack']);
+        Song::factory()->onAlbum($withTracks, 1)->create();
+
+        $empty = Album::factory()->create(['title' => 'Wwwsearchable Soundtrack']);
+
+        $response = $this->getJson('/api/v1/search?q=Wwwsearchable&type=album');
+
+        $response->assertOk();
+
+        $ids = collect($response->json('data'))->pluck('id');
+
+        $this->assertTrue($ids->contains($withTracks->id));
+        $this->assertFalse($ids->contains($empty->id));
+    }
+
+    /**
+     * The ranking that makes searching a film title find its soundtrack.
+     *
+     * A film name matches its soundtrack and every remix single that borrows the
+     * name, and album `popularity` is 0 across the synced catalog, so relevance
+     * ties used to be broken by nothing at all. Track count breaks them, and
+     * `songs_count` is in the payload so a client can rank on it too.
+     */
+    public function test_album_search_ranks_a_fuller_album_above_a_same_titled_single(): void
+    {
+        $single = Album::factory()->create(['title' => 'Vvvsearchable']);
+        Song::factory()->onAlbum($single, 1)->create();
+
+        $soundtrack = Album::factory()->create(['title' => 'Vvvsearchable']);
+
+        foreach (range(1, 5) as $track) {
+            Song::factory()->onAlbum($soundtrack, $track)->create();
+        }
+
+        $response = $this->getJson('/api/v1/search?q=Vvvsearchable&type=album');
+
+        $response->assertOk()
+            ->assertJsonPath('data.0.id', $soundtrack->id)
+            ->assertJsonPath('data.0.songs_count', 5)
+            ->assertJsonPath('data.1.id', $single->id)
+            ->assertJsonPath('data.1.songs_count', 1);
     }
 }

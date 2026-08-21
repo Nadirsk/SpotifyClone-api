@@ -143,6 +143,7 @@ class Song extends Model
     public function playlists(): BelongsToMany
     {
         return $this->belongsToMany(Playlist::class, 'playlist_tracks')
+            ->using(PlaylistTrack::class)
             ->withPivot(['position', 'added_at']);
     }
 

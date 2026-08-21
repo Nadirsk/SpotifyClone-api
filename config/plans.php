@@ -39,6 +39,40 @@ use App\Enums\SubscriptionPlan;
 | `=== 'platinum'` comparisons. Keys are stable contract with the frontend —
 | `GET /plans` ships them verbatim to build the comparison table.
 |
+| ## On `accounts` versus `max_sessions`
+|
+| These are two different numbers and conflating them is the bug this pair of
+| keys exists to prevent.
+|
+| `accounts` is **seats** — how many people a plan covers, the Duo/Family
+| concept in `12_SCOPE_OF_WORK` FR.I.1(a). Nothing enforces it, because no
+| invite or seat-management mechanism exists yet; it is display copy on the
+| plan card and nothing more. Do not gate anything on it.
+|
+| `max_sessions` is **concurrent logged-in devices**, and it *is* enforced —
+| by `DeviceSessionService`, at the moment a token is minted. `null` means
+| uncapped.
+|
+| ### What this cannot do
+|
+| It caps **logins, not playback.** `12_SCOPE_OF_WORK` §FR.I "The one hard
+| blocker" spells out why: a concurrent-*stream* limit can only be counted by
+| whoever serves the audio, and this platform serves none — it holds provider
+| deep-links (`11` §2) and audio hosting is out of scope (`01` §12). So two
+| devices that are both inside the cap can still play at the same time, and
+| nothing here can see that, let alone stop it. Anyone reading these numbers
+| as "how many people can listen at once" is reading them wrong.
+|
+| ### Choosing the numbers
+|
+| Free is uncapped on purpose. A cap of 1 there would sign a listener out of
+| their phone every time they opened the site on a laptop, before they have
+| bought anything — no comparable service does this, and it is a poor first
+| impression to charge for. The paid tiers cap at their seat count, which is
+| the promise the plans page makes. If a single device turns out to be too
+| strict for Standard in practice, this is a one-line change — raise it here
+| and the login screen, the device list and the plan copy all follow.
+|
 */
 
 return [
@@ -77,6 +111,8 @@ return [
         'name' => 'Free',
         'tagline' => 'Listen with limits.',
         'accounts' => 1,
+        // Uncapped — see "Choosing the numbers" above.
+        'max_sessions' => null,
         'entitlements' => [
             // Free listeners get shuffle only — the "play songs in any order"
             // row of the comparison table.
@@ -97,6 +133,9 @@ return [
             'playlist_with_episodes' => false,
             'ad_free' => false,
             'unlimited_skips' => false,
+            'playlist_mixing' => false,
+            // Platinum-exclusive — see that plan's own entitlements for why.
+            'listen_together' => false,
         ],
     ],
 
@@ -104,6 +143,7 @@ return [
         'name' => 'Standard',
         'tagline' => 'Listen without limits. Cancel anytime.',
         'accounts' => 1,
+        'max_sessions' => 1,
         'reference_price' => ['INR' => 13900, 'USD' => 1199],
         'entitlements' => [
             'on_demand_playback' => true,
@@ -116,6 +156,10 @@ return [
             'playlist_with_episodes' => true,
             'ad_free' => true,
             'unlimited_skips' => true,
+            // Platinum-exclusive — see that plan's own entitlements for why.
+            'playlist_mixing' => false,
+            // Platinum-exclusive — see that plan's own entitlements for why.
+            'listen_together' => false,
         ],
     ],
 
@@ -123,6 +167,7 @@ return [
         'name' => 'Platinum',
         'tagline' => 'Everything in Standard, at the highest fidelity.',
         'accounts' => 3,
+        'max_sessions' => 3,
         'reference_price' => ['INR' => 29900, 'USD' => 1999],
         'entitlements' => [
             'on_demand_playback' => true,
@@ -137,6 +182,33 @@ return [
             'playlist_with_episodes' => true,
             'ad_free' => true,
             'unlimited_skips' => true,
+            /*
+             | The entitlements Platinum does *not* share downward to
+             | Standard/Student — every other flag in this file is identical
+             | across all three paid tiers (the tiers differ in eligibility and
+             | audio quality, not features; see Student's own note below).
+             | "Mix Your Playlists" is deliberately drawn as Platinum's one
+             | exclusive, at explicit product request — it needs no backend
+             | enforcement of its own precisely because it is exclusive: the
+             | feature has no dedicated endpoint (it only calls the existing
+             | playlist read/create/add-song routes, all of which are already
+             | reachable by every plan), so the entitlement below is read by
+             | the frontend at its single entry point
+             | (`LeftSidebar`'s "Mix Your Playlists" menu item) rather than by
+             | any controller here.
+             */
+            'playlist_mixing' => true,
+            /*
+             | Listen Together, Platinum-exclusive at explicit product
+             | request — unlike `playlist_mixing` above, this one *does* have
+             | its own endpoints (`ListeningRoomController::store`/`join`), so
+             | it is enforced server-side, not just read by the frontend to
+             | hide a button. Both sides of a room need this: the host who
+             | opens it and every guest who joins by invite link, so a
+             | Free/Standard/Student listener cannot ride along on someone
+             | else's Platinum room either. See `SubscriptionService::can()`.
+             */
+            'listen_together' => true,
         ],
     ],
 
@@ -144,6 +216,7 @@ return [
         'name' => 'Student',
         'tagline' => 'Standard, for verified students.',
         'accounts' => 1,
+        'max_sessions' => 1,
         'reference_price' => ['INR' => 6900, 'USD' => 599],
         // Identical entitlements to Standard by design — the tiers differ in
         // eligibility, not in what they unlock. See SubscriptionPlan's doc.
@@ -158,6 +231,10 @@ return [
             'playlist_with_episodes' => true,
             'ad_free' => true,
             'unlimited_skips' => true,
+            // Platinum-exclusive — see that plan's own entitlements for why.
+            'playlist_mixing' => false,
+            // Platinum-exclusive — see that plan's own entitlements for why.
+            'listen_together' => false,
         ],
     ],
 

@@ -126,4 +126,33 @@ return [
         // How long a generated "Invite collaborators" link stays usable.
         'invite_expiry_days' => 30,
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Listen Together
+    |--------------------------------------------------------------------------
+    */
+
+    'listening' => [
+        // Six characters of the alphabet below is ~1.3 billion codes, which is
+        // far more than a room table that empties itself needs, and short
+        // enough to read down a phone. See ListeningRoomService::freshCode().
+        'code_length' => 6,
+        // I, O, 0 and 1 are omitted on purpose: a room code gets read aloud and
+        // typed by hand, and those four are the pairs people get wrong.
+        'code_alphabet' => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789',
+        // A cap on how many listeners one room fans out to. Every playback
+        // change is one broadcast to every member, so this bounds the blast
+        // radius of a host holding down the seek bar.
+        'max_members' => 20,
+        // The room queue mirrors the host player queue, which is itself capped
+        // by `playlists.max_tracks`; this is the narrower of the two on purpose,
+        // because the whole queue is re-broadcast as a snapshot on every change.
+        'max_queue' => 200,
+        // A room with nobody in it is closed rather than kept: see
+        // ListeningRoomService::leave(). This only covers the rooms whose last
+        // member vanished without saying goodbye (a closed laptop), which is
+        // why it is measured in hours rather than seconds.
+        'idle_expiry_minutes' => 180,
+    ],
 ];

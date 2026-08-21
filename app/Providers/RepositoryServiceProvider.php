@@ -10,6 +10,7 @@ use App\Contracts\Repositories\ArtistRepository;
 use App\Contracts\Repositories\ConcertRepository;
 use App\Contracts\Repositories\FavoriteRepository;
 use App\Contracts\Repositories\HistoryRepository;
+use App\Contracts\Repositories\ListeningRoomRepository;
 use App\Contracts\Repositories\PlaylistRepository;
 use App\Contracts\Repositories\SearchHistoryRepository;
 use App\Contracts\Repositories\SongRepository;
@@ -21,6 +22,7 @@ use App\Repositories\EloquentArtistRepository;
 use App\Repositories\EloquentConcertRepository;
 use App\Repositories\EloquentFavoriteRepository;
 use App\Repositories\EloquentHistoryRepository;
+use App\Repositories\EloquentListeningRoomRepository;
 use App\Repositories\EloquentPlaylistRepository;
 use App\Repositories\EloquentSearchHistoryRepository;
 use App\Repositories\EloquentSongRepository;
@@ -47,6 +49,7 @@ class RepositoryServiceProvider extends ServiceProvider
         UserRepository::class => EloquentUserRepository::class,
         UserFollowRepository::class => EloquentUserFollowRepository::class,
         SearchHistoryRepository::class => EloquentSearchHistoryRepository::class,
+        ListeningRoomRepository::class => EloquentListeningRoomRepository::class,
     ];
 
     public function register(): void

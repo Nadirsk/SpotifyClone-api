@@ -19,6 +19,24 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    /*
+     | Channel authorization for the listening rooms.
+     |
+     | Registered explicitly rather than by passing `channels:` to
+     | withRouting() above, because that helper's auto-registration puts
+     | /broadcasting/auth behind the `web` group - cookie and session auth,
+     | which this API deliberately does not have (see the statefulApi note
+     | below). Echo would be presenting a bearer token to a route that reads
+     | a session, and be told it is a guest on every single subscribe.
+     |
+     | The `api/v1` prefix is not cosmetic either: config/cors.php allows
+     | `api/*` only, so an auth endpoint outside that prefix is unreachable
+     | from the browser as soon as the frontend is on another origin.
+     */
+    ->withBroadcasting(
+        __DIR__.'/../routes/channels.php',
+        attributes: ['prefix' => 'api/v1', 'middleware' => ['api', 'auth:sanctum']],
+    )
     ->withMiddleware(function (Middleware $middleware): void {
         /*
          | Laravel does not put `throttle` in the api group by default, so the

@@ -113,6 +113,20 @@ final class SubscriptionService
     }
 
     /**
+     * How many devices this listener may stay signed in on at once, or `null`
+     * for uncapped.
+     *
+     * Resolved through `planFor()` like every other ceiling, so a lapsed
+     * subscription drops back to the Free tier's (uncapped) allowance rather
+     * than stranding someone at a paid plan's limit they no longer pay for.
+     * Enforced by `DeviceSessionService`.
+     */
+    public function maxSessionsFor(User $user): ?int
+    {
+        return $this->plans->maxSessions($this->planFor($user));
+    }
+
+    /**
      * Whether this account has ever held a paid subscription.
      *
      * The two-months-introductory pricing on the plans page is only offered to

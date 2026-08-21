@@ -6,6 +6,7 @@ namespace App\Services\Auth;
 
 use App\Contracts\Repositories\UserRepository;
 use App\Events\UserRegistered;
+use App\Exceptions\SessionLimitReachedException;
 use App\Models\User;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
@@ -24,6 +25,13 @@ use Throwable;
  * Every failure path here is deliberately uninformative: the API must never
  * confirm or deny that a given email has an account. See the comments on
  * `login()` and `forgotPassword()`.
+ *
+ * One failure is the exception, and only because it happens *after* the
+ * credential check has already passed: the per-plan device cap. Every path that
+ * hands out a session funnels through `issueToken()`, which delegates to
+ * {@see DeviceSessionService} — so a login can succeed and still not produce a
+ * token, because the account is signed in on as many devices as it pays for.
+ * `resolveSessionConflict()` is how that gets unstuck.
  */
 final class AuthService
 {
@@ -49,8 +57,6 @@ final class AuthService
 
     private const LOGIN_DECAY_SECONDS = 60;
 
-    private const TOKEN_NAME = 'api';
-
     /**
      * A real bcrypt digest of a throwaway string, compared against when no user
      * row is found so that an unknown email costs the same wall-clock time as a
@@ -62,6 +68,7 @@ final class AuthService
         private readonly UserRepository $users,
         private readonly OtpService $otp,
         private readonly EmailLoginCodeService $emailLoginCode,
+        private readonly DeviceSessionService $devices,
     ) {}
 
     /**
@@ -240,8 +247,35 @@ final class AuthService
     }
 
     /**
+     * Finish a login that hit the plan's device cap: sign the chosen devices
+     * out, then mint the session that `issueToken()` refused.
+     *
+     * The ticket is the authentication here — see
+     * {@see SessionLimitReachedException} for why the caller has nothing else to
+     * present at this point. If the account is somehow *still* over its cap
+     * afterwards — they sent fewer ids than `sessions_to_free` asked for, or
+     * another device signed in meanwhile — `issueToken()` throws again with a
+     * fresh list and a fresh ticket. Clients must adopt that new payload; the
+     * old ticket has been spent and will only ever 422 from here on.
+     *
+     * @param  list<int>  $sessionIds
+     * @return array{user: User, token: string}
+     */
+    public function resolveSessionConflict(string $ticket, array $sessionIds): array
+    {
+        $user = $this->devices->resolveConflict($ticket, $sessionIds);
+
+        return [
+            'user' => $user,
+            'token' => $this->issueToken($user),
+        ];
+    }
+
+    /**
      * Revokes only the token that made this request. Other devices stay signed
      * in — logging out of a phone should not sign the user out of a laptop.
+     * Signing *another* device out is `DeviceSessionService::revoke()`, reached
+     * through `DELETE /auth/sessions/{id}`.
      */
     public function logout(User $user): void
     {
@@ -360,9 +394,22 @@ final class AuthService
         ];
     }
 
+    /**
+     * The single choke point for minting a session, which is what lets the
+     * per-plan device cap be enforced in one place instead of at each of the six
+     * paths that reach here (register, register-with-phone, password login,
+     * phone OTP, email code, Google).
+     *
+     * @throws SessionLimitReachedException when the account already holds as
+     *                                      many live sessions as its plan
+     *                                      allows. Both register paths reach
+     *                                      this too, harmlessly: a brand-new
+     *                                      account has no sessions to be over
+     *                                      the cap with.
+     */
     private function issueToken(User $user): string
     {
-        return $user->createToken(self::TOKEN_NAME)->plainTextToken;
+        return $this->devices->issueFor($user);
     }
 
     /**

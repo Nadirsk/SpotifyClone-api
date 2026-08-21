@@ -89,6 +89,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AuthenticatedEnvelope" }
+        "409": { $ref: "#/components/responses/DeviceLimitReached" }
         "422": { $ref: "#/components/responses/ValidationError" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
@@ -99,6 +100,104 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Success" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/sessions:
+    get:
+      tags: [Auth]
+      summary: List the devices this account is signed in on
+      description: >
+        Every live token, plus the plan's ceiling (max_sessions, null on Free
+        which is uncapped) so a client can render "2 of 3" without a second
+        request. Ordered oldest first. The cap limits logins, not playback: this
+        platform serves no audio, so no concurrent stream can be counted or cut.
+      responses:
+        "200":
+          description: Signed-in devices
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          max_sessions: { type: integer, nullable: true, example: 3 }
+                          sessions:
+                            type: array
+                            items: { $ref: "#/components/schemas/DeviceSession" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+    delete:
+      tags: [Auth]
+      summary: Sign out every device except this one
+      responses:
+        "200":
+          description: Other devices signed out
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          signed_out: { type: integer, example: 2 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/sessions/{session}:
+    delete:
+      tags: [Auth]
+      summary: Sign one device out
+      description: >
+        Passing your own session id is allowed and behaves like a logout. A 404
+        is returned both for an id that does not exist and for one belonging to
+        another account — distinguishing them would confirm a guessed id.
+      parameters:
+        - name: session
+          in: path
+          required: true
+          description: personal_access_tokens.id, an integer unlike the UUIDs used elsewhere.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /auth/sessions/resolve:
+    post:
+      tags: [Auth]
+      summary: Finish a login that hit the device cap
+      description: >
+        The second half of any login that answered 409. Signs the chosen device
+        out and issues the token that was withheld. Unauthenticated by necessity
+        — the caller has no token yet, which is the whole problem — so the
+        single-use resolution_token from that 409 is the credential here. It
+        expires in five minutes, authorises nothing but revoking a session
+        belonging to the one account it was minted for, and is spent on success.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolution_token, session_id]
+              properties:
+                resolution_token: { type: string, maxLength: 255 }
+                session_id: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthenticatedEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/DeviceLimitReached" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
   /auth/me:
     get:
@@ -210,6 +309,14 @@ paths:
         results per type. With `type`, returns one paginated list. Backed by
         MySQL FULLTEXT today; see DEFERRED.md for the Elasticsearch upgrade
         path — the response shape does not change either way.
+
+
+        Album results carry `songs_count` and exclude albums holding no tracks,
+        so every album returned is one a client can play. Ties in relevance are
+        broken by that count before popularity, which is what makes a film title
+        find its soundtrack rather than a same-named remix single. A misspelled
+        term falls back to fuzzy matching, which is not filtered this way —
+        see `DatabaseSearchEngine::requireSomethingToPlay()`.
       security: []
       parameters:
         - $ref: "#/components/parameters/Query"
@@ -1321,6 +1428,20 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    DeviceLimitReached:
+      description: >
+        Credentials were accepted, but the account already holds as many live
+        device sessions as its plan allows. The only error in this API that
+        carries a body: the caller resolves it by posting one of the listed
+        session ids to /auth/sessions/resolve with the enclosed token.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorEnvelope"
+              - type: object
+                properties:
+                  session_limit: { $ref: "#/components/schemas/SessionLimit" }
     SongList:
       description: A plain list of songs
       content:
@@ -1439,6 +1560,51 @@ components:
                 token: { type: string }
                 token_type: { type: string, example: Bearer }
 
+    DeviceSession:
+      type: object
+      description: >
+        One logged-in device. Never exposes the token hash or its abilities, and
+        carries no IP or location — the label and last_used_at answer the only
+        question a device list needs to answer.
+      properties:
+        id: { type: integer, example: 73 }
+        device:
+          type: string
+          example: Safari on iPhone
+          description: Coarse label derived from the User-Agent.
+        created_at: { type: string, format: date-time, nullable: true }
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null between a login and that device's first authenticated request.
+        current:
+          type: boolean
+          description: True for the session making the request. Always false inside SessionLimit.
+
+    SessionLimit:
+      type: object
+      description: >
+        The body of a 409 from any login route when the plan's device cap is
+        already met.
+      properties:
+        plan: { type: string, example: standard }
+        plan_label: { type: string, example: Premium Standard }
+        max_sessions: { type: integer, example: 1 }
+        resolution_token:
+          type: string
+          description: >
+            Single-use and credential-grade while it lives — it stands in for the
+            bearer token the caller does not have yet. Must never be logged or
+            persisted.
+        expires_in:
+          type: integer
+          example: 300
+          description: Seconds the token stays spendable.
+        sessions:
+          type: array
+          items: { $ref: "#/components/schemas/DeviceSession" }
+
     User:
       type: object
       description: Never includes password, remember_token, or email_verified_at.
@@ -1488,7 +1654,22 @@ components:
         title: { type: string }
         cover_image: { type: string, format: uri, nullable: true }
         release_date: { type: string, format: date, nullable: true }
-        total_tracks: { type: integer }
+        total_tracks:
+          type: integer
+          description: >
+            What the provider says the release contains. 0 wherever the provider
+            reported no count, which is most of the catalog — an album's track
+            count is only published on a provider's album *detail* response, and
+            albums mostly arrive from a search or from an artist's discography.
+            Use songs_count to know what is actually here.
+        songs_count:
+          type: integer
+          description: >
+            How many of this album's tracks the catalog holds. Present only where
+            the endpoint counted them — today that is GET /search results, whose
+            album rows also exclude albums holding no tracks at all. Disagrees
+            with total_tracks whenever an album is partially synced, and both
+            answers are meaningful.
         popularity: { type: integer, minimum: 0, maximum: 100 }
         artist: { $ref: "#/components/schemas/Artist" }
         language: { $ref: "#/components/schemas/Language" }
