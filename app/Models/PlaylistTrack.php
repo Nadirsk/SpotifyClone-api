@@ -5,10 +5,16 @@ declare(strict_types=1);
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\Pivot;
 
-class PlaylistTrack extends Model
+/**
+ * Extends `Pivot` (not a plain `Model`) so `Playlist::songs()`/`Song::playlists()`
+ * can `->using(PlaylistTrack::class)` — that is what makes the relation hydrate
+ * `$song->pivot` as an actual `PlaylistTrack`, with `added_at` cast to Carbon,
+ * instead of a generic `Pivot` holding raw column strings.
+ */
+class PlaylistTrack extends Pivot
 {
     use HasUuids;
 

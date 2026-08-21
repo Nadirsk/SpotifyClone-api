@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Exceptions\SessionLimitReachedException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\ForgotPasswordRequest;
 use App\Http\Requests\Auth\LoginRequest;
@@ -11,6 +12,7 @@ use App\Http\Requests\Auth\LoginWithPhoneRequest;
 use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Requests\Auth\RegisterWithPhoneRequest;
 use App\Http\Requests\Auth\ResetPasswordRequest;
+use App\Http\Requests\Auth\ResolveSessionConflictRequest;
 use App\Http\Requests\Auth\SendEmailLoginCodeRequest;
 use App\Http\Requests\Auth\VerifyEmailLoginCodeRequest;
 use App\Http\Resources\UserResource;
@@ -82,6 +84,28 @@ final class AuthController extends Controller
         $result = $this->auth->loginWithEmailCode(
             (string) $request->validated('email'),
             (string) $request->validated('code'),
+        );
+
+        return $this->respondSuccess($this->tokenPayload($result), 'Login successful');
+    }
+
+    /**
+     * The second half of a login that came back 409 because the account was
+     * already signed in on as many devices as its plan covers. Takes a list of
+     * devices to sign out, because the 409 can ask for more than one — see
+     * `DeviceSessionService::resolveConflict()`. Carries no
+     * `auth:sanctum` middleware for the reason the whole flow exists — the
+     * caller has no token yet. The `resolution_token` in the body is the
+     * credential here; see {@see SessionLimitReachedException}.
+     */
+    public function resolveSessionConflict(ResolveSessionConflictRequest $request): JsonResponse
+    {
+        /** @var list<int> $sessionIds */
+        $sessionIds = array_map('intval', (array) $request->validated('session_ids'));
+
+        $result = $this->auth->resolveSessionConflict(
+            (string) $request->validated('resolution_token'),
+            $sessionIds,
         );
 
         return $this->respondSuccess($this->tokenPayload($result), 'Login successful');

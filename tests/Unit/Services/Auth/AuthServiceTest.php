@@ -8,6 +8,7 @@ use App\Events\UserRegistered;
 use App\Models\User;
 use App\Repositories\EloquentUserRepository;
 use App\Services\Auth\AuthService;
+use App\Services\Auth\DeviceSessionService;
 use App\Services\Auth\EmailLoginCodeService;
 use App\Services\Auth\OtpService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -42,6 +43,13 @@ final class AuthServiceTest extends TestCase
             new EloquentUserRepository,
             app(OtpService::class),
             app(EmailLoginCodeService::class),
+            /*
+             | Resolved rather than hand-built: it needs the current Request for
+             | the device label, and the container already has the one the test
+             | harness set up. The cap it enforces never fires in this file —
+             | every user here is on the Free tier, which is uncapped.
+             */
+            app(DeviceSessionService::class),
         );
     }
 

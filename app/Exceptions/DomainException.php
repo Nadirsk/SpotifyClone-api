@@ -87,6 +87,33 @@ final class DomainException extends HttpException
         return new self(422, 'That plan cannot be purchased.');
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | Device sessions
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Worded without confirming whether the id exists at all: this is also the
+     * answer when a caller names a session belonging to somebody else, and
+     * "that session is not yours" would tell them they had guessed a real one.
+     */
+    public static function deviceSessionNotFound(): self
+    {
+        return new self(404, 'That device is not signed in to this account.');
+    }
+
+    /**
+     * 422 rather than 401: the ticket is not a credential the caller can fix by
+     * re-presenting it, and a 401 would trip the frontend's interceptor into
+     * clearing a token this caller does not have. The remedy is to start the
+     * sign-in over, which is what the message says.
+     */
+    public static function deviceSessionTicketExpired(): self
+    {
+        return new self(422, 'This sign-in attempt has expired. Please sign in again.');
+    }
+
     /**
      * The provider serves a fixed ladder of bitrates and this platform never
      * transcodes (11_PROVIDER_INTEGRATION), so a track with no usable source
@@ -95,5 +122,55 @@ final class DomainException extends HttpException
     public static function noAudioSource(): self
     {
         return new self(404, 'No playable audio source exists for this track.');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Listen Together
+    |--------------------------------------------------------------------------
+    */
+
+    public static function listeningRoomNotFound(): self
+    {
+        return new self(404, 'No listening room exists with that code.');
+    }
+
+    /**
+     * 410 rather than 404, and the distinction is the whole reason rooms are
+     * closed instead of deleted: whoever clicked the link needs to know if they
+     * mistyped the code or simply arrived after everyone went home. Those are
+     * different problems with different next steps, and one status for both
+     * sends someone to check their spelling for ten minutes.
+     */
+    public static function listeningRoomEnded(): self
+    {
+        return new self(410, 'This listening room has ended.');
+    }
+
+    public static function listeningRoomFull(int $max): self
+    {
+        return new self(422, "This listening room is full ({$max} listeners).");
+    }
+
+    public static function listeningQueueFull(int $max): self
+    {
+        return new self(422, "A listening room queue can hold at most {$max} songs.");
+    }
+
+    public static function listeningQueueItemNotFound(): self
+    {
+        return new self(404, 'That song is not in this room queue.');
+    }
+
+    /**
+     * A room whose code could not be minted. Reachable only by losing the
+     * collision race repeatedly, which at six characters of a 32-symbol
+     * alphabet means the table is holding an implausible number of live rooms —
+     * so this is a capacity signal rather than a validation failure, and 503
+     * says "try again" instead of "you did it wrong".
+     */
+    public static function listeningRoomCodeUnavailable(): self
+    {
+        return new self(503, 'Could not create a listening room right now. Please try again.');
     }
 }

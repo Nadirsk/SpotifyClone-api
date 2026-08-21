@@ -91,6 +91,17 @@ final class ApiExceptionRenderer
             'errors' => (object) $errors,
         ];
 
+        /*
+         | The one error in the app that carries a body. The client cannot act on
+         | "you are signed in on too many devices" without being told *which*
+         | devices and given something to act with, and `errors` is field-keyed
+         | validation messages — the wrong shape and the wrong meaning. See the
+         | exception's own docblock.
+         */
+        if ($e instanceof SessionLimitReachedException) {
+            $payload['session_limit'] = $e->payload();
+        }
+
         if ($status === 500 && config('app.debug') === true) {
             $payload['debug'] = [
                 'exception' => $e::class,

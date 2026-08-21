@@ -10,6 +10,9 @@ use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 
@@ -32,6 +35,7 @@ class AppServiceProvider extends ServiceProvider
         $this->configureRateLimiting();
         $this->configureModels();
         $this->configurePasswordResetUrl();
+        $this->configureQueueHeartbeat();
     }
 
     /**
@@ -115,6 +119,21 @@ class AppServiceProvider extends ServiceProvider
             $frontendUrl = rtrim((string) config('cors.allowed_origins.0'), '/');
 
             return "{$frontendUrl}/reset-password?token={$token}&email=".urlencode($user->email);
+        });
+    }
+
+    /**
+     * Feeds GET /diagnostics (DiagnosticsController) a "last job processed"
+     * timestamp, which is the only externally-checkable signal that a queue
+     * worker is actually running rather than merely configured. `Queue::after`
+     * fires for every job on every connection/queue this process ever works,
+     * so this one listener covers `sync`, `default` and `notifications`
+     * without naming any of them.
+     */
+    private function configureQueueHeartbeat(): void
+    {
+        Queue::after(function (JobProcessed $event): void {
+            Cache::put('diagnostics:queue_heartbeat', now(), now()->addHours(2));
         });
     }
 }

@@ -97,6 +97,27 @@ final class DatabaseSearchEngine implements SearchEngine
     ];
 
     /**
+     * Aggregates a type carries for the *client's* benefit rather than for
+     * ordering — selected on every search of that type, whatever the sort.
+     *
+     * Albums count their tracks because a result set of albums is the one place
+     * "how big is this?" decides which row is the answer. Someone searching a
+     * film name means its soundtrack, and the only thing separating that album
+     * from the remix single and the mashup that share its title is that the
+     * soundtrack has ten tracks and they have one. `applySort()` ranks on it,
+     * `AlbumResource` exposes it, and the client uses it to decide which album
+     * is worth leading with.
+     *
+     * Distinct from POPULARITY_COUNTS on purpose: that map redirects a type's
+     * *ranking* column, and albums rank by their own `popularity` as before.
+     *
+     * @var array<string, string>
+     */
+    private const RESULT_COUNTS = [
+        'album' => 'songs',
+    ];
+
+    /**
      * Minimum edit-distance similarity (see `similarity()`) for a fuzzy
      * candidate to surface at all. Tuned against real typos this catalog
      * needs to survive: "Arjit Singh" → "Arijit Singh" (0.92), "Arijeet
@@ -227,10 +248,59 @@ final class DatabaseSearchEngine implements SearchEngine
 
         $this->matchText($builder, $table, $config['column'], $query->term, $config['credit'] ?? null);
         $this->withPopularityCount($builder, $type);
+        $this->withResultCount($builder, $type);
+        $this->requireSomethingToPlay($builder, $type);
         $this->applyFilters($builder, $type, $query);
         $this->applySort($builder, $type, $query);
 
         return $builder;
+    }
+
+    /**
+     * Drops results that lead nowhere.
+     *
+     * An album with no tracks is not a result, it is a dead end — and a third of
+     * the albums this catalog holds are exactly that. They are not an obscure
+     * corner of it either, they are the by-product of how albums arrive: a song
+     * search names the album each hit belongs to and an artist's detail response
+     * lists their discography, so album rows are created long before anything
+     * fetches those albums' track lists (`LazySyncSearchJob` pulls tracks for
+     * only the first few hits of a search; the crawler works through the rest in
+     * its own time).
+     *
+     * Searching a film name is where it showed. The film's real soundtrack and
+     * an empty shell of the same title both matched, the shell frequently ranked
+     * first — nothing in relevance or popularity separated them — and opening it
+     * gave a page with no tracks and a play button whose only possible answer
+     * was "nothing here has a preview available".
+     *
+     * ## Why this is here and not in `applyFilters()`
+     *
+     * `applyFilters()` is shared with `fuzzyMatch()`, where the same predicate
+     * costs an order of magnitude more. Here it narrows a candidate set FULLTEXT
+     * has already cut to a handful of rows (measured: 0.3s for the match plus
+     * this). The fuzzy pass has no such bound — it scans the thousand most
+     * popular rows of the table — and the semi-join across all 34k albums on a
+     * 36-character UUID foreign key took it from 0.28s to 3.2s.
+     *
+     * So a typo'd search can still surface a trackless album where a correctly
+     * spelled one cannot. That is the deliberate trade: the fuzzy pass only runs
+     * when the catalog matched *nothing*, where "found you something close" is
+     * worth more than "everything found is playable", and three seconds of
+     * latency is not worth spending to tidy the tail of a fallback.
+     *
+     * `AlbumRepository::findOrFail()` is untouched either way, so a direct link
+     * to an album whose tracks have not landed yet still resolves — they fill in
+     * on the next sync, and 404-ing it in the meantime would be a worse answer
+     * than an empty tracklist.
+     *
+     * @param  Builder<Model>  $builder
+     */
+    private function requireSomethingToPlay(Builder $builder, string $type): void
+    {
+        if ($type === 'album') {
+            $builder->whereHas('songs');
+        }
     }
 
     /**
@@ -247,6 +317,24 @@ final class DatabaseSearchEngine implements SearchEngine
     private function withPopularityCount(Builder $builder, string $type): void
     {
         $relation = self::POPULARITY_COUNTS[$type] ?? null;
+
+        if ($relation !== null) {
+            $builder->withCount($relation);
+        }
+    }
+
+    /**
+     * Select the informational aggregates of {@see RESULT_COUNTS}.
+     *
+     * Same ordering constraint as `withPopularityCount()` — `applySort()` may
+     * order by `songs_count`, which is only a legal ORDER BY once `withCount()`
+     * has put it in the select list.
+     *
+     * @param  Builder<Model>  $builder
+     */
+    private function withResultCount(Builder $builder, string $type): void
+    {
+        $relation = self::RESULT_COUNTS[$type] ?? null;
 
         if ($relation !== null) {
             $builder->withCount($relation);
@@ -703,9 +791,23 @@ final class DatabaseSearchEngine implements SearchEngine
              | Relevance alone clusters ties arbitrarily, so popularity breaks
              | them — this is the "exact match, then popularity" ranking from
              | 06_SEARCH_ARCHITECTURE §8.
+             |
+             | Albums get one more key ahead of popularity, and it does the real
+             | work: synced albums almost all carry `popularity` 0 (the provider
+             | publishes no album-level score), so relevance ties among albums
+             | were being broken by nothing at all. A film name matches its
+             | soundtrack, a remix single, and two or three mashups with the film
+             | in their title — every one of them scoring the same. Track count
+             | is the signal that actually separates them, and it points the
+             | right way: the album someone typing a film name means is the one
+             | with the film's songs in it.
              */
             SortOrder::Relevance => $builder
                 ->orderByDesc('relevance')
+                ->when(
+                    isset(self::RESULT_COUNTS[$type]),
+                    fn (Builder $query): Builder => $query->orderByDesc(self::RESULT_COUNTS[$type].'_count'),
+                )
                 ->orderByDesc($this->popularityColumn($type)),
         };
     }

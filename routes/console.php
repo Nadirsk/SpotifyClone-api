@@ -12,6 +12,7 @@ use App\Jobs\SyncPlaylistsJob;
 use App\Jobs\SyncSongsJob;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Schedule;
 
 Artisan::command('inspire', function () {
@@ -112,3 +113,32 @@ Schedule::job(new CleanupJob)
     ->dailyAt('03:00')
     ->withoutOverlapping()
     ->name('cleanup:daily');
+
+/*
+ | Closes listening rooms whose members all vanished without leaving — a shut
+ | laptop, a killed tab. Hourly because the expiry it enforces is measured in
+ | hours (config/music.php), and because a room lingering a little too long is
+ | invisible while a room closed out from under people listening to it is not.
+ |
+ | Unlike every other entry in this file this runs inline rather than
+ | dispatching a job: it is a single UPDATE, and putting it on the `sync` queue
+ | would make room expiry depend on a queue worker being up.
+ */
+Schedule::command('listening-rooms:prune')
+    ->hourly()
+    ->withoutOverlapping()
+    ->name('listening-rooms:prune');
+
+/*
+ | A dedicated, minute-by-minute heartbeat for GET /diagnostics
+ | (DiagnosticsController) - see that controller's own doc for why it exists
+ | at all. Every entry above already proves the scheduler is alive
+ | indirectly, but their cadences (5 minutes to daily) are too coarse to
+ | answer "is cron ticking right now" in under a minute, which is what a
+ | page meant to be checked on demand actually needs. TTL well past the
+ | 60s cadence so a slow tick reads as "stale" rather than the key simply
+ | having expired.
+ */
+Schedule::call(fn () => Cache::put('diagnostics:scheduler_heartbeat', now(), now()->addMinutes(10)))
+    ->everyMinute()
+    ->name('diagnostics:heartbeat');

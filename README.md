@@ -12,14 +12,16 @@ Architecture and requirements live in the numbered documents one level up
 
 ## Local setup
 
-This machine's global `php` is XAMPP's 7.4, which cannot run Laravel 12. Use
-Herd's PHP 8.3 explicitly:
+Use Herd's PHP 8.3 for every `php`/`composer` command:
 
 ```powershell
 $env:PATH = "C:\Users\AAIBUZZ 1\.config\herd\bin\php83;" + $env:PATH
 ```
 
-Every command below assumes that is on the PATH.
+Every command below assumes that is on the PATH. (XAMPP's bundled PHP is
+8.2.12 — it does run this app, and it is what serves it over Apache in step 4,
+but keep the CLI on 8.3 so `artisan` matches the version in `composer.json`'s
+`require`. See step 4 for what that split does and does not permit.)
 
 ### 1. Start MySQL
 
@@ -42,10 +44,54 @@ Start-Process "C:\xampp\mysql\bin\mysqld.exe" `
 composer install
 php artisan key:generate      # only if APP_KEY is empty
 php artisan migrate --seed
-php artisan serve             # http://localhost:8000
 ```
 
-### 4. Queue worker
+### 4. Serve the API — **not** with `php artisan serve`
+
+```powershell
+Start-Process "C:\xampp\apache\bin\httpd.exe" -WindowStyle Hidden   # http://127.0.0.1:8000
+```
+
+`artisan serve` uses PHP's built-in server, which is **single-threaded**: it
+finishes one request before it starts the next, and `PHP_CLI_SERVER_WORKERS`
+does not help because it needs `fork()`. That is fine for one request at a
+time and actively broken for this app, whose pages fan out to a dozen or more
+API calls at once. Measured against `/api/v1/genres`, eight parallel requests
+came back at 2.9s, 3.2s, 4.0s, 4.4s, 4.8s, 5.4s, 5.8s and 7.5s — a perfect
+ladder, one request per second, queued behind each other. Twenty of them puts
+the last one past the frontend's 20s Axios timeout, so the browser aborts it,
+and the page loses a panel to a request the server would eventually have
+answered.
+
+Apache serves the same port from a thread pool instead. Same twenty requests,
+slowest 0.92s. The configuration is already in place:
+
+| File | What it does |
+|---|---|
+| `C:\xampp\apache\conf\httpd.conf` | `Listen 127.0.0.1:8000` — loopback only, exactly as `artisan serve` bound it |
+| `C:\xampp\apache\conf\extra\httpd-vhosts.conf` | vhost for `backend/public`, `AllowOverride All` so Laravel's `.htaccess` front controller works |
+| `C:\xampp\php\php.ini` | opcache enabled (`zend_extension=opcache`) |
+
+Port 8000 is deliberate: `NEXT_PUBLIC_API_URL`, `APP_URL`, the CORS config and
+`next.config.ts`'s image `remotePatterns` all already point there, so switching
+servers needed no other change.
+
+opcache matters nearly as much as the threading. Without it Laravel recompiles
+every file on every request — that was the whole of the 1.1s each of those
+ladder steps cost. With it a warm request is 0.06–0.2s at a 99.6% hit rate.
+`opcache.validate_timestamps=1` with `revalidate_freq=0` keeps edits picked up
+immediately, so it is safe for development.
+
+The web SAPI is XAMPP's PHP 8.2.12 while the CLI uses Herd's 8.3. That split is
+tolerable only because `composer.json` requires `^8.2`, `composer
+check-platform-reqs` passes clean on 8.2.12, and nothing in `app/` uses 8.3-only
+syntax. Introducing typed class constants, `#[Override]` or `json_validate()`
+would run under `artisan` and 500 in the browser — if you need them, move Apache
+onto Herd's PHP via FastCGI first.
+
+To stop Apache: `Stop-Process -Name httpd -Force`.
+
+### 5. Queue worker
 
 Long-running work (provider sync, trending, cleanup) is queued. Horizon is
 deferred until Redis exists, so run the plain worker:

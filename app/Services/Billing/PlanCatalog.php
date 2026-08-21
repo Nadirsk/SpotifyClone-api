@@ -56,6 +56,7 @@ final class PlanCatalog
             'label' => $plan->label(),
             'tagline' => $config['tagline'],
             'accounts' => $config['accounts'],
+            'max_sessions' => $this->maxSessions($plan),
             'currency' => $currency,
             'symbol' => $this->symbol($currency),
             /*
@@ -101,6 +102,23 @@ final class PlanCatalog
     public function maxQuality(SubscriptionPlan $plan): AudioQuality
     {
         return AudioQuality::from($this->entitlements($plan)['max_audio_quality']);
+    }
+
+    /**
+     * How many devices may hold a live token on this plan at once. `null` is
+     * uncapped, which is what the Free tier is.
+     *
+     * Deliberately not inside `entitlements`: that map is a set of boolean-ish
+     * capability flags the frontend renders as comparison-table rows, and a
+     * nullable integer read by exactly one service does not belong in it. See
+     * `config/plans.php` for why this is not the same number as `accounts`, and
+     * for what it cannot do (it caps logins, not streams).
+     */
+    public function maxSessions(SubscriptionPlan $plan): ?int
+    {
+        $max = $this->config($plan)['max_sessions'] ?? null;
+
+        return $max === null ? null : (int) $max;
     }
 
     /**

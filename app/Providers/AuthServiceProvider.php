@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Models\ListeningRoom;
 use App\Models\Playlist;
+use App\Policies\ListeningRoomPolicy;
 use App\Policies\PlaylistPolicy;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
@@ -23,6 +25,7 @@ class AuthServiceProvider extends ServiceProvider
     /** @var array<class-string, class-string> */
     private const POLICIES = [
         Playlist::class => PlaylistPolicy::class,
+        ListeningRoom::class => ListeningRoomPolicy::class,
     ];
 
     public function boot(): void

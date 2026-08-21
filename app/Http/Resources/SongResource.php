@@ -50,6 +50,17 @@ final class SongResource extends JsonResource
             'external_url' => $this->external_url,
 
             /*
+             | Only present when this song was serialised off `Playlist::songs()`
+             | — the one relation that `->using(PlaylistTrack::class)`, so
+             | `$this->pivot` is a real `PlaylistTrack` there and null everywhere
+             | else (search, an album's tracklist, `GET /songs/{id}`).
+             */
+            'added_at' => $this->when(
+                $this->pivot !== null,
+                fn (): ?string => $this->pivot->added_at?->toIso8601String(),
+            ),
+
+            /*
              | The closure form of whenLoaded is required rather than
              | `ArtistResource::make($this->whenLoaded('artist'))`: it yields
              | null for a loaded-but-null relation (a song with no album) and
