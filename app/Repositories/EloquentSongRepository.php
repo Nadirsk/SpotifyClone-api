@@ -67,6 +67,16 @@ final class EloquentSongRepository implements SongRepository
         return $this->relatedByArtist($song, $limit);
     }
 
+    public function findMany(array $ids): Collection
+    {
+        if ($ids === []) {
+            return new Collection;
+        }
+
+        /** @var Collection<int, Song> */
+        return $this->baseQuery()->whereIn('id', $ids)->get();
+    }
+
     public function trending(int $limit): Collection
     {
         /** @var Collection<int, Song> */

@@ -26,6 +26,15 @@ interface SongRepository
      */
     public function related(Song $song, int $limit): Collection;
 
+    /**
+     * Many songs by id, with catalog relations loaded, in no particular
+     * order — the caller (BlendGenerationService) re-sorts by its own score.
+     *
+     * @param  list<string>  $ids
+     * @return Collection<int, Song>
+     */
+    public function findMany(array $ids): Collection;
+
     /** @return Collection<int, Song> */
     public function trending(int $limit): Collection;
 

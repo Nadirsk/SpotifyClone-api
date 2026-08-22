@@ -155,4 +155,35 @@ return [
         // why it is measured in hours rather than seconds.
         'idle_expiry_minutes' => 180,
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Blend
+    |--------------------------------------------------------------------------
+    |
+    | No source in 01-11 — built on explicit request, following the same
+    | private-by-default, invite-based pattern as Listen Together.
+    |
+    */
+
+    'blends' => [
+        // Matches real Spotify's own Blend cap ("up to 10 people may join a
+        // Blend"). Also bounds the O(members) fan-out in
+        // BlendGenerationService — every member's taste profile is built and
+        // cross-scored against every candidate song, and a Blend re-generates
+        // on every membership change.
+        'max_members' => 10,
+        // Mirrors playlists.max_tracks in spirit, not value: a Blend is a
+        // generated shelf, not a user-curated collection, so it stays well
+        // under the playlist ceiling.
+        'max_tracks' => 100,
+        'invite_expiry_days' => 14,
+        // How many of a member's own favorites/history/playlist songs feed the
+        // taste profile — the same "sample, don't scan everything" shape as
+        // RecommendationService::SEED_SAMPLE.
+        'taste_sample_size' => 50,
+        // Related-song candidates fetched per seed favorite, for the
+        // "discover together" tail of the ranking.
+        'discovery_per_seed' => 5,
+    ],
 ];
