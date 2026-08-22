@@ -6,6 +6,8 @@ use App\Http\Controllers\Api\V1\AlbumController;
 use App\Http\Controllers\Api\V1\ArtistController;
 use App\Http\Controllers\Api\V1\ArtistFollowController;
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\BlendController;
+use App\Http\Controllers\Api\V1\BlendInvitationController;
 use App\Http\Controllers\Api\V1\ConcertController;
 use App\Http\Controllers\Api\V1\DeviceSessionController;
 use App\Http\Controllers\Api\V1\FavoriteController;
@@ -275,6 +277,52 @@ Route::prefix('users')->group(function (): void {
     Route::middleware('auth:sanctum')->group(function (): void {
         Route::post('{id}/follow', [UserFollowController::class, 'store']);
         Route::delete('{id}/follow', [UserFollowController::class, 'destroy']);
+    });
+});
+
+/*
+|--------------------------------------------------------------------------
+| Blend — combines two or more users' music taste into a shared, generated
+| playlist
+|--------------------------------------------------------------------------
+|
+| No source in 01-11 — built on explicit request, following the same
+| private-by-default, invite-based pattern as Listen Together. Unlike
+| playlists, EVERY route below requires auth:sanctum — a Blend has no
+| public/unlisted tier to fall back to for a guest, so there is no bare
+| GET /blends or GET /blends/{blend} outside the auth group.
+|
+| The one exception is the pre-login invitation preview, registered first for
+| the same reason `playlists/invitations/{token}` is: it must not be
+| swallowed by `blends/{blend}` once that wildcard is registered below.
+|
+*/
+
+Route::get('blends/invitations/{token}', [BlendInvitationController::class, 'showByToken']);
+
+Route::middleware('auth:sanctum')->group(function (): void {
+    Route::get('blends', [BlendController::class, 'index']);
+    Route::post('blends', [BlendController::class, 'store']);
+
+    Route::post('blends/invitations/{token}/accept', [BlendInvitationController::class, 'accept']);
+    Route::post('blends/invitations/{token}/decline', [BlendInvitationController::class, 'decline']);
+
+    Route::prefix('blends')->group(function (): void {
+        Route::get('{blend}', [BlendController::class, 'show']);
+        Route::put('{blend}', [BlendController::class, 'update']);
+        Route::delete('{blend}', [BlendController::class, 'destroy']);
+
+        // Manual "Refresh Blend" — see BlendController::refresh's own doc for
+        // why this one carries an inline throttle.
+        Route::post('{blend}/refresh', [BlendController::class, 'refresh'])->middleware('throttle:2,60');
+
+        Route::post('{blend}/save', [BlendController::class, 'save']);
+        Route::post('{blend}/leave', [BlendController::class, 'leave']);
+        Route::delete('{blend}/members/{user}', [BlendController::class, 'removeMember']);
+
+        Route::get('{blend}/invitations', [BlendInvitationController::class, 'index']);
+        Route::post('{blend}/invitations', [BlendInvitationController::class, 'store']);
+        Route::delete('{blend}/invitations/{invitation}', [BlendInvitationController::class, 'revoke']);
     });
 });
 

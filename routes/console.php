@@ -6,6 +6,7 @@ use App\Jobs\CleanupJob;
 use App\Jobs\CrawlFrontierJob;
 use App\Jobs\DiscoverNewReleasesJob;
 use App\Jobs\RefreshTrendingJob;
+use App\Jobs\RegenerateBlendsJob;
 use App\Jobs\SyncAlbumsJob;
 use App\Jobs\SyncArtistsJob;
 use App\Jobs\SyncPlaylistsJob;
@@ -128,6 +129,19 @@ Schedule::command('listening-rooms:prune')
     ->hourly()
     ->withoutOverlapping()
     ->name('listening-rooms:prune');
+
+/*
+ | "Blend updates periodically based on new listening activity"
+ | (12_SCOPE_OF_WORK §18). Daily rather than hourly like the sync jobs above:
+ | a Blend's taste profile moves at the pace of someone's favorites and
+ | listening habits, not the catalog's, and a manual "Refresh Blend"
+ | (rate-limited, see BlendController::refresh) already covers anyone who
+ | wants it sooner.
+ */
+Schedule::job(new RegenerateBlendsJob)
+    ->daily()
+    ->withoutOverlapping()
+    ->name('blend:regenerate');
 
 /*
  | A dedicated, minute-by-minute heartbeat for GET /diagnostics

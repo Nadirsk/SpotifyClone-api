@@ -133,4 +133,18 @@ class User extends Authenticatable
         return $this->belongsToMany(User::class, 'user_follows', 'follower_id', 'followed_id')
             ->withTimestamps();
     }
+
+    /** Blends this user created. @return HasMany<Blend, $this> */
+    public function createdBlends(): HasMany
+    {
+        return $this->hasMany(Blend::class, 'created_by');
+    }
+
+    /** Every Blend this user is a member of, creator included. @return BelongsToMany<Blend, $this> */
+    public function blends(): BelongsToMany
+    {
+        return $this->belongsToMany(Blend::class, 'blend_members')
+            ->withPivot('role')
+            ->withTimestamps();
+    }
 }

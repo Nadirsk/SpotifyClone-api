@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Models\Blend;
 use App\Models\ListeningRoom;
 use App\Models\Playlist;
+use App\Policies\BlendPolicy;
 use App\Policies\ListeningRoomPolicy;
 use App\Policies\PlaylistPolicy;
 use Illuminate\Support\Facades\Gate;
@@ -26,6 +28,7 @@ class AuthServiceProvider extends ServiceProvider
     private const POLICIES = [
         Playlist::class => PlaylistPolicy::class,
         ListeningRoom::class => ListeningRoomPolicy::class,
+        Blend::class => BlendPolicy::class,
     ];
 
     public function boot(): void

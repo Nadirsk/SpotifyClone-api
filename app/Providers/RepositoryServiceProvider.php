@@ -7,6 +7,7 @@ namespace App\Providers;
 use App\Contracts\Repositories\AlbumRepository;
 use App\Contracts\Repositories\ArtistFollowRepository;
 use App\Contracts\Repositories\ArtistRepository;
+use App\Contracts\Repositories\BlendRepository;
 use App\Contracts\Repositories\ConcertRepository;
 use App\Contracts\Repositories\FavoriteRepository;
 use App\Contracts\Repositories\HistoryRepository;
@@ -19,6 +20,7 @@ use App\Contracts\Repositories\UserRepository;
 use App\Repositories\EloquentAlbumRepository;
 use App\Repositories\EloquentArtistFollowRepository;
 use App\Repositories\EloquentArtistRepository;
+use App\Repositories\EloquentBlendRepository;
 use App\Repositories\EloquentConcertRepository;
 use App\Repositories\EloquentFavoriteRepository;
 use App\Repositories\EloquentHistoryRepository;
@@ -50,6 +52,7 @@ class RepositoryServiceProvider extends ServiceProvider
         UserFollowRepository::class => EloquentUserFollowRepository::class,
         SearchHistoryRepository::class => EloquentSearchHistoryRepository::class,
         ListeningRoomRepository::class => EloquentListeningRoomRepository::class,
+        BlendRepository::class => EloquentBlendRepository::class,
     ];
 
     public function register(): void

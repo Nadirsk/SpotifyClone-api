@@ -173,4 +173,69 @@ final class DomainException extends HttpException
     {
         return new self(503, 'Could not create a listening room right now. Please try again.');
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Blend
+    |--------------------------------------------------------------------------
+    */
+
+    public static function blendFull(int $max): self
+    {
+        return new self(422, "A Blend can have at most {$max} members.");
+    }
+
+    public static function alreadyBlendMember(): self
+    {
+        return new self(409, 'This person is already in the Blend.');
+    }
+
+    public static function cannotInviteSelfToBlend(): self
+    {
+        return new self(422, 'You cannot invite yourself to your own Blend.');
+    }
+
+    public static function blendInvitationInvalid(): self
+    {
+        return new self(404, 'This invitation is invalid, expired, or has already been used.');
+    }
+
+    /**
+     * 403, not 404: the token is real and resolves to a real Blend, but the
+     * signed-in account is not who it was addressed to. Distinguishing this
+     * from "invalid token" is what 12_SCOPE_OF_WORK §23 means by "never trust
+     * blend_id from the frontend without authorization" applied to invitations.
+     */
+    public static function blendInvitationNotForYou(): self
+    {
+        return new self(403, 'This invitation was not sent to your account.');
+    }
+
+    public static function notABlendMember(): self
+    {
+        return new self(404, 'This user is not a member of this Blend.');
+    }
+
+    public static function cannotRemoveBlendCreator(): self
+    {
+        return new self(422, "The creator can't be removed from their own Blend — delete it instead.");
+    }
+
+    /**
+     * The creator cannot "leave" — deleting the Blend is the only equivalent
+     * action, same distinction as `PlaylistPolicy::leave`.
+     */
+    public static function blendCreatorCannotLeave(): self
+    {
+        return new self(422, 'As the creator, you can delete this Blend but cannot leave it.');
+    }
+
+    /**
+     * Thrown when a Blend has fewer than two active members — nothing to
+     * combine yet, so BlendGenerationService has nothing to do.
+     */
+    public static function blendNotYetActive(): self
+    {
+        return new self(422, 'This Blend needs at least one more member before it can be generated.');
+    }
 }
