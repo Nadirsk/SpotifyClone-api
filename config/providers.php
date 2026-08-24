@@ -213,6 +213,23 @@ return [
 
     'crawl' => [
         /*
+         | Whether the scheduler is allowed to run CrawlFrontierJob /
+         | DiscoverNewReleasesJob at all (routes/console.php). Distinct from
+         | the provider's own `enabled` flag above: with lazy search sync on,
+         | every committed search already seeds the frontier and syncs songs
+         | inline regardless of this setting — this only gates the
+         | *background* discovery sweep that walks the frontier unattended,
+         | which is `expand_artists` turning into a self-feeding closure over
+         | JioSaavn's entire catalog (every song discovers more artists, every
+         | artist discovers more songs) rather than staying scoped to what was
+         | actually searched. Off by default so a fresh checkout — or a
+         | machine mid-MVP-work that does not want its disk and JioSaavn
+         | wrapper saturated 24/7 — only ever fetches what someone searches
+         | for. Flip on to actually build out the full local catalog.
+         */
+        'enabled' => (bool) env('CATALOG_CRAWL_ENABLED', false),
+
+        /*
          | Targets claimed per CrawlFrontierJob run. The job takes a lease on
          | each one, so this is also the blast radius of a worker dying
          | mid-run — those leases expire and the targets return to the queue.

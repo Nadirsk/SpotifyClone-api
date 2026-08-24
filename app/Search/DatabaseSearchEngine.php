@@ -792,18 +792,29 @@ final class DatabaseSearchEngine implements SearchEngine
              | them — this is the "exact match, then popularity" ranking from
              | 06_SEARCH_ARCHITECTURE §8.
              |
-             | Albums get one more key ahead of popularity, and it does the real
-             | work: synced albums almost all carry `popularity` 0 (the provider
-             | publishes no album-level score), so relevance ties among albums
-             | were being broken by nothing at all. A film name matches its
-             | soundtrack, a remix single, and two or three mashups with the film
-             | in their title — every one of them scoring the same. Track count
-             | is the signal that actually separates them, and it points the
-             | right way: the album someone typing a film name means is the one
-             | with the film's songs in it.
+             | Albums weight relevance by track count instead of only breaking
+             | ties with it. A tie-break alone assumed the soundtrack, a remix
+             | single and a mashup would all score *identically* on relevance —
+             | true when they share one qualifier-free title, false the moment
+             | one of them happens to repeat the query's word: MySQL's BOOLEAN
+             | MODE score is roughly additive per occurrence, so "Ye Awarapan
+             | (Awarapan 2)" (one song, "Awarapan" appearing twice) scored 25.4
+             | against "Awarapan 2" the real eight-song soundtrack's 13.4 for a
+             | search of "awarapan 2" — not a tie, so the track-count key never
+             | got a turn and the one-song title won outright. Multiplying by
+             | log(track count) rather than only tie-breaking on it fixes this
+             | without discarding relevance: a genuinely better title match
+             | still wins when it should, but no longer purely by containing
+             | the query's words an extra time.
              */
             SortOrder::Relevance => $builder
-                ->orderByDesc('relevance')
+                ->when(
+                    isset(self::RESULT_COUNTS[$type]),
+                    fn (Builder $query): Builder => $query->orderByRaw(
+                        'relevance * LOG('.self::RESULT_COUNTS[$type].'_count + 1) desc'
+                    ),
+                    fn (Builder $query): Builder => $query->orderByDesc('relevance'),
+                )
                 ->when(
                     isset(self::RESULT_COUNTS[$type]),
                     fn (Builder $query): Builder => $query->orderByDesc(self::RESULT_COUNTS[$type].'_count'),

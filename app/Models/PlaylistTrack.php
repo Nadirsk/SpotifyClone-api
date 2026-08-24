@@ -18,6 +18,20 @@ class PlaylistTrack extends Pivot
 {
     use HasUuids;
 
+    /*
+     | Without this, `AsPivot::getTable()` falls back to its own default —
+     | `Str::singular(class_basename($this))`, i.e. `playlist_track` — which is
+     | a different convention from a plain Model's (which would have correctly
+     | pluralized to `playlist_tracks`, the table the migration actually
+     | creates). Every direct `PlaylistTrack::query()` call (adding/removing a
+     | song from a playlist, `PlaylistSyncService`'s track reconciliation) hit
+     | "Base table or view not found: playlist_track" until this was set.
+     | Relation-driven pivot access (`Playlist::songs()->attach()` etc.) never
+     | hit it — `belongsToMany()` passes `playlist_tracks` explicitly and that
+     | wins regardless of this class's own default.
+     */
+    protected $table = 'playlist_tracks';
+
     public $timestamps = false;
 
     /** @var list<string> */
