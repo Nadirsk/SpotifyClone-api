@@ -110,9 +110,19 @@
             var start = Date.now();
             var settled = false;
 
+            // Verbose so the raw close code/reason for a failed or timed-out
+            // handshake lands in the browser console, not just the page's
+            // one-line summary - that raw detail is what actually tells apart
+            // "Reverb is down" from "Nginx never proxies the upgrade" below.
+            Pusher.logToConsole = true;
+
             var timeout = setTimeout(function () {
                 if (settled) return;
                 settled = true;
+                console.error('[diagnostics] Reverb handshake timed out after 8s', {
+                    url: scheme + '://' + host + ':' + port,
+                    connectionState: pusher.connection.state,
+                });
                 statusEl.innerHTML = '<span class="fail">Timed out</span>'
                     + '<div class="detail">No response within 8s from '
                     + scheme + '://' + host + ':' + port + '. Check that `php artisan reverb:start` '
@@ -149,6 +159,11 @@
                 if (settled) return;
                 settled = true;
                 clearTimeout(timeout);
+                // The page only ever shows the extracted message; the full object
+                // (close code, type - e.g. WebSocketError vs PusherError) only goes
+                // to the console, since that's what actually distinguishes a TLS/DNS
+                // failure from Nginx accepting the socket and Reverb refusing it.
+                console.error('[diagnostics] Reverb connection error', err);
                 var message = (err && err.error && err.error.data && err.error.data.message)
                     ? err.error.data.message
                     : ('Could not reach ' + scheme + '://' + host + ':' + port);
