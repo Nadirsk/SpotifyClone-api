@@ -67,6 +67,7 @@ Artisan::command('inspire', function () {
 Schedule::job(new CrawlFrontierJob)
     ->everyFiveMinutes()
     ->withoutOverlapping()
+    ->when(fn (): bool => (bool) config('providers.crawl.enabled'))
     ->name('catalog:crawl');
 
 /*
@@ -77,6 +78,7 @@ Schedule::job(new CrawlFrontierJob)
 Schedule::job(new DiscoverNewReleasesJob)
     ->hourly()
     ->withoutOverlapping()
+    ->when(fn (): bool => (bool) config('providers.crawl.enabled'))
     ->name('catalog:new-releases');
 
 Schedule::job(new RefreshTrendingJob)
