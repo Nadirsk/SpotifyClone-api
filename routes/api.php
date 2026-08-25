@@ -2,6 +2,20 @@
 
 declare(strict_types=1);
 
+use App\Http\Controllers\Api\V1\Admin\AdminAlbumController;
+use App\Http\Controllers\Api\V1\Admin\AdminArtistController;
+use App\Http\Controllers\Api\V1\Admin\AdminBlendController;
+use App\Http\Controllers\Api\V1\Admin\AdminConcertController;
+use App\Http\Controllers\Api\V1\Admin\AdminDashboardController;
+use App\Http\Controllers\Api\V1\Admin\AdminGenreController;
+use App\Http\Controllers\Api\V1\Admin\AdminLanguageController;
+use App\Http\Controllers\Api\V1\Admin\AdminPlanController;
+use App\Http\Controllers\Api\V1\Admin\AdminPlaylistController;
+use App\Http\Controllers\Api\V1\Admin\AdminReportController;
+use App\Http\Controllers\Api\V1\Admin\AdminSubscriptionController;
+use App\Http\Controllers\Api\V1\Admin\AdminVenueController;
+use App\Http\Controllers\Api\V1\Admin\AdminSongController;
+use App\Http\Controllers\Api\V1\Admin\AdminUserController;
 use App\Http\Controllers\Api\V1\AlbumController;
 use App\Http\Controllers\Api\V1\ArtistController;
 use App\Http\Controllers\Api\V1\ArtistFollowController;
@@ -467,4 +481,114 @@ Route::middleware('auth:sanctum')->prefix('listening-rooms')->group(function ():
     Route::put('{code}/queue', [ListeningRoomQueueController::class, 'replace']);
     Route::post('{code}/queue', [ListeningRoomQueueController::class, 'store']);
     Route::delete('{code}/queue/{item}', [ListeningRoomQueueController::class, 'destroy']);
+});
+
+/*
+|--------------------------------------------------------------------------
+| Admin panel
+|--------------------------------------------------------------------------
+|
+| Gated by `admin` on top of `auth:sanctum` (see EnsureUserIsAdmin) — a
+| listener's otherwise-valid token gets a 403 here, not a 401. Admin login
+| itself reuses the public POST /auth/login above; there is no separate
+| admin auth endpoint.
+|
+| Each screen's routes are added here as they are built, per the
+| screen-by-screen admin panel development plan.
+|
+*/
+
+Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function (): void {
+    Route::prefix('songs')->group(function (): void {
+        Route::get('/', [AdminSongController::class, 'index']);
+        Route::post('/', [AdminSongController::class, 'store']);
+        Route::get('{id}', [AdminSongController::class, 'show']);
+        Route::put('{id}', [AdminSongController::class, 'update']);
+        Route::delete('{id}', [AdminSongController::class, 'destroy']);
+    });
+
+    Route::prefix('users')->group(function (): void {
+        Route::get('/', [AdminUserController::class, 'index']);
+        Route::get('{id}', [AdminUserController::class, 'show']);
+        Route::put('{id}/role', [AdminUserController::class, 'updateRole']);
+        Route::delete('{id}', [AdminUserController::class, 'destroy']);
+    });
+
+    Route::prefix('artists')->group(function (): void {
+        Route::get('/', [AdminArtistController::class, 'index']);
+        Route::post('/', [AdminArtistController::class, 'store']);
+        Route::get('{id}', [AdminArtistController::class, 'show']);
+        Route::put('{id}', [AdminArtistController::class, 'update']);
+        Route::delete('{id}', [AdminArtistController::class, 'destroy']);
+    });
+
+    Route::prefix('albums')->group(function (): void {
+        Route::get('/', [AdminAlbumController::class, 'index']);
+        Route::post('/', [AdminAlbumController::class, 'store']);
+        Route::get('{id}', [AdminAlbumController::class, 'show']);
+        Route::put('{id}', [AdminAlbumController::class, 'update']);
+        Route::delete('{id}', [AdminAlbumController::class, 'destroy']);
+    });
+
+    Route::prefix('genres')->group(function (): void {
+        Route::get('/', [AdminGenreController::class, 'index']);
+        Route::post('/', [AdminGenreController::class, 'store']);
+        Route::put('{id}', [AdminGenreController::class, 'update']);
+        Route::delete('{id}', [AdminGenreController::class, 'destroy']);
+    });
+
+    Route::prefix('playlists')->group(function (): void {
+        Route::get('/', [AdminPlaylistController::class, 'index']);
+        Route::get('{id}', [AdminPlaylistController::class, 'show']);
+        Route::delete('{id}', [AdminPlaylistController::class, 'destroy']);
+    });
+
+    Route::prefix('venues')->group(function (): void {
+        Route::get('/', [AdminVenueController::class, 'index']);
+        Route::post('/', [AdminVenueController::class, 'store']);
+        Route::put('{id}', [AdminVenueController::class, 'update']);
+        Route::delete('{id}', [AdminVenueController::class, 'destroy']);
+    });
+
+    Route::prefix('concerts')->group(function (): void {
+        Route::get('/', [AdminConcertController::class, 'index']);
+        Route::post('/', [AdminConcertController::class, 'store']);
+        Route::get('{id}', [AdminConcertController::class, 'show']);
+        Route::put('{id}', [AdminConcertController::class, 'update']);
+        Route::delete('{id}', [AdminConcertController::class, 'destroy']);
+    });
+
+    Route::prefix('languages')->group(function (): void {
+        Route::get('/', [AdminLanguageController::class, 'index']);
+        Route::post('/', [AdminLanguageController::class, 'store']);
+        Route::put('{id}', [AdminLanguageController::class, 'update']);
+        Route::delete('{id}', [AdminLanguageController::class, 'destroy']);
+    });
+
+    Route::prefix('blends')->group(function (): void {
+        Route::get('/', [AdminBlendController::class, 'index']);
+        Route::get('{id}', [AdminBlendController::class, 'show']);
+        Route::delete('{id}', [AdminBlendController::class, 'destroy']);
+    });
+
+    Route::prefix('subscriptions')->group(function (): void {
+        Route::get('/', [AdminSubscriptionController::class, 'index']);
+        Route::put('{id}/status', [AdminSubscriptionController::class, 'updateStatus']);
+    });
+
+    Route::prefix('plans')->group(function (): void {
+        Route::get('/', [AdminPlanController::class, 'index']);
+        Route::post('/', [AdminPlanController::class, 'store']);
+        Route::put('{plan}', [AdminPlanController::class, 'update']);
+        Route::delete('entitlements/{key}', [AdminPlanController::class, 'destroyEntitlement']);
+    });
+
+    Route::prefix('dashboard')->group(function (): void {
+        Route::get('summary', [AdminDashboardController::class, 'summary']);
+        Route::get('revenue-trend', [AdminDashboardController::class, 'revenueTrend']);
+        Route::get('trending-songs', [AdminDashboardController::class, 'trendingSongs']);
+        Route::get('new-releases', [AdminDashboardController::class, 'newReleases']);
+    });
+
+    Route::get('reports', [AdminReportController::class, 'index']);
 });

@@ -27,6 +27,16 @@ interface BlendRepository
     public function findOrFail(string $id): Blend;
 
     /**
+     * The admin panel's own listing — every Blend regardless of membership,
+     * with an optional title/creator search. There is no per-user scope
+     * here the way {@see paginateForUser} has one: this is moderation, not
+     * a listener's own library.
+     *
+     * @return LengthAwarePaginator<int, Blend>
+     */
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator;
+
+    /**
      * Creates the Blend and seats its creator as the first member, in one
      * transaction — a Blend with no members at all is not a state anything
      * else in this feature is written to expect.

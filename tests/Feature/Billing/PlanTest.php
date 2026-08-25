@@ -40,7 +40,7 @@ final class PlanTest extends TestCase
             static fn (array $plan): bool => $plan['price'] !== null,
         ));
 
-        $this->assertCount(3, $paid, 'Standard, Platinum and Student should all be purchasable.');
+        $this->assertCount(3, $paid, 'Standard, Platinum and Golden should all be purchasable.');
 
         foreach ($paid as $plan) {
             $price = $plan['price'];

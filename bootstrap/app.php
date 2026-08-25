@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Exceptions\ApiExceptionRenderer;
+use App\Http\Middleware\EnsureUserIsAdmin;
 use App\Http\Middleware\ForceJsonResponse;
 use App\Http\Middleware\LogApiRequests;
 use App\Http\Middleware\RequestId;
@@ -75,6 +76,10 @@ return Application::configure(basePath: dirname(__DIR__))
          | ApiExceptionRenderer untouched.
          */
         $middleware->redirectGuestsTo(fn (): ?string => null);
+
+        $middleware->alias([
+            'admin' => EnsureUserIsAdmin::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         ApiExceptionRenderer::register($exceptions);

@@ -15,7 +15,11 @@ use RuntimeException;
  */
 final class ProfileService
 {
-    private const AVATAR_DISK = 'public';
+    /**
+     * Vultr Object Storage (S3-compatible) — see config/filesystems.php.
+     * Local disk would lose every avatar on a redeploy or a second app server.
+     */
+    private const AVATAR_DISK = 'vultr';
 
     private const AVATAR_DIRECTORY = 'avatars';
 
@@ -38,7 +42,13 @@ final class ProfileService
 
     public function updateAvatar(User $user, UploadedFile $avatar): User
     {
-        $path = $avatar->store(self::AVATAR_DIRECTORY, self::AVATAR_DISK);
+        // S3-compatible disks default to private objects — 'visibility' has
+        // to be set explicitly, unlike the local 'public' disk which is
+        // public by virtue of the storage:link symlink it sits behind.
+        $path = $avatar->store(self::AVATAR_DIRECTORY, [
+            'disk' => self::AVATAR_DISK,
+            'visibility' => 'public',
+        ]);
 
         if (! is_string($path)) {
             throw new RuntimeException('Failed to store the uploaded avatar.');

@@ -34,6 +34,18 @@ final class UpdateProfileRequest extends FormRequest
                 'max:255',
                 Rule::unique('users', 'email')->ignore($user?->getKey()),
             ],
+            /*
+             | Same shape as registration's phone field (RegisterWithPhoneRequest)
+             | — 10 digits, no country code — but nullable: an email-registered
+             | account has no phone until it sets one here, and clearing it back
+             | to null has to stay possible.
+             */
+            'phone' => [
+                'sometimes',
+                'nullable',
+                'digits:10',
+                Rule::unique('users', 'phone')->ignore($user?->getKey()),
+            ],
             'country' => ['nullable', 'string', 'size:2'],
             /*
              | Not nullable like `country`: the `users.language` column is

@@ -23,4 +23,21 @@ interface AlbumRepository
 
     /** @return Collection<int, Album> */
     public function trending(int $limit): Collection;
+
+    /**
+     * The admin panel's own listing: newest first, with an optional
+     * title search. Never cached, unlike {@see paginate()} — an admin
+     * editing an album needs to see the result immediately.
+     *
+     * @return LengthAwarePaginator<int, Album>
+     */
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator;
+
+    /** @param  array<string, mixed>  $data */
+    public function create(array $data): Album;
+
+    /** @param  array<string, mixed>  $data */
+    public function update(Album $album, array $data): Album;
+
+    public function delete(Album $album): void;
 }

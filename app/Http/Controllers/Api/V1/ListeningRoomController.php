@@ -102,7 +102,7 @@ final class ListeningRoomController extends Controller
      * non-member is allowed to take, so room-membership authorization has
      * nothing to check. What *is* checked is the same plan gate `store()`
      * applies: Listen Together is Platinum-exclusive for everyone in the room,
-     * not just its host, so a Free/Standard/Student listener cannot ride along
+     * not just its host, so a Free/Standard/Golden listener cannot ride along
      * on someone else's room by invite link either.
      */
     public function join(Request $request, string $code): JsonResponse

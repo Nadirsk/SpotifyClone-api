@@ -44,6 +44,26 @@ final class EloquentPlaylistRepository implements PlaylistRepository
         return $this->baseQuery()->findOrFail($id);
     }
 
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator
+    {
+        $builder = $this->baseQuery()
+            ->userCreated()
+            ->orderByDesc('created_at');
+
+        if ($search !== null && $search !== '') {
+            $builder->where(function (Builder $query) use ($search): void {
+                $query->where('title', 'like', '%'.$search.'%')
+                    ->orWhereHas('owner', function (Builder $owner) use ($search): void {
+                        $owner->where('name', 'like', '%'.$search.'%')
+                            ->orWhere('email', 'like', '%'.$search.'%');
+                    });
+            });
+        }
+
+        /** @var LengthAwarePaginator<int, Playlist> */
+        return $builder->paginate(perPage: $limit, page: $page);
+    }
+
     public function create(User $owner, array $attributes): Playlist
     {
         /** @var Playlist $playlist */

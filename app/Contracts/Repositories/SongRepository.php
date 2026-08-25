@@ -47,4 +47,26 @@ interface SongRepository
     public function forArtist(string $artistId, CatalogQuery $query): LengthAwarePaginator;
 
     public function incrementPlayCount(Song $song): void;
+
+    /**
+     * The admin panel's own listing: same filters/sort as {@see paginate()}
+     * plus a free-text title search, and never cached — an admin editing a
+     * song needs to see the result immediately, not after the `song` cache
+     * bucket's hour-long TTL.
+     *
+     * @return LengthAwarePaginator<int, Song>
+     */
+    public function adminPaginate(CatalogQuery $query, ?string $search): LengthAwarePaginator;
+
+    /**
+     * @param  array<string, mixed>  $data
+     */
+    public function create(array $data): Song;
+
+    /**
+     * @param  array<string, mixed>  $data
+     */
+    public function update(Song $song, array $data): Song;
+
+    public function delete(Song $song): void;
 }

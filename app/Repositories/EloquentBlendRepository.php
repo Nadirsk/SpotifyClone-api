@@ -46,6 +46,24 @@ final class EloquentBlendRepository implements BlendRepository
         return $this->baseQuery()->findOrFail($id);
     }
 
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator
+    {
+        $builder = $this->baseQuery()->orderByDesc('created_at');
+
+        if ($search !== null && $search !== '') {
+            $builder->where(function (Builder $query) use ($search): void {
+                $query->where('title', 'like', '%'.$search.'%')
+                    ->orWhereHas('creator', function (Builder $creator) use ($search): void {
+                        $creator->where('name', 'like', '%'.$search.'%')
+                            ->orWhere('email', 'like', '%'.$search.'%');
+                    });
+            });
+        }
+
+        /** @var LengthAwarePaginator<int, Blend> */
+        return $builder->paginate(perPage: $limit, page: $page);
+    }
+
     public function create(User $creator, array $attributes): Blend
     {
         return DB::transaction(function () use ($creator, $attributes): Blend {

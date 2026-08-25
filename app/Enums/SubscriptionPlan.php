@@ -12,17 +12,17 @@ namespace App\Enums;
  * rather than seeding every new account with a subscription record. That keeps
  * "has the user ever paid" answerable by the table's existence alone.
  *
- * Student is deliberately its own case rather than Standard-with-a-discount:
- * the two differ in eligibility (an accredited institution) even though their
- * entitlements are identical, and collapsing them would make the eligibility
- * re-check at renewal impossible to express.
+ * Golden is deliberately its own case rather than Standard-with-a-discount:
+ * the two differ in eligibility even though their entitlements are identical,
+ * and collapsing them would make that eligibility re-check at renewal
+ * impossible to express.
  */
 enum SubscriptionPlan: string
 {
     case Free = 'free';
     case Standard = 'standard';
     case Platinum = 'platinum';
-    case Student = 'student';
+    case Golden = 'golden';
 
     /** @return list<string> */
     public static function values(): array
@@ -50,7 +50,7 @@ enum SubscriptionPlan: string
             self::Free => 'Free',
             self::Standard => 'Premium Standard',
             self::Platinum => 'Premium Platinum',
-            self::Student => 'Premium Student',
+            self::Golden => 'Premium Golden',
         };
     }
 }

@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Services\Catalog;
 
 use App\Enums\AudioQuality;
+use App\Enums\SubscriptionPlan;
 use App\Models\Song;
 use App\Models\User;
+use App\Services\Billing\PlanCatalog;
 use App\Services\Billing\SubscriptionService;
 
 /**
@@ -59,6 +61,7 @@ final class AudioAccess
     public function __construct(
         private readonly AudioSourceResolver $resolver,
         private readonly SubscriptionService $subscriptions,
+        private readonly PlanCatalog $plans,
     ) {}
 
     /**
@@ -88,7 +91,7 @@ final class AudioAccess
         $key = $user === null ? '' : (string) $user->getKey();
 
         return $this->ceilings[$key] ??= $user === null
-            ? AudioQuality::from(config('plans.free.entitlements.max_audio_quality'))
+            ? $this->plans->maxQuality(SubscriptionPlan::Free)
             : AudioQuality::from($this->subscriptions->entitlementsFor($user)['max_audio_quality']);
     }
 }

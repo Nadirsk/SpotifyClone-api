@@ -17,9 +17,20 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => [env('FRONTEND_URL', 'http://localhost:3000')],
+    'allowed_origins' => [
+        env('FRONTEND_URL', 'http://localhost:3000'),
+        env('ADMIN_URL', 'http://localhost:5174'),
+    ],
 
-    'allowed_origins_patterns' => [],
+    /*
+     | Vite auto-increments the admin app's port when 5174 is already taken
+     | (e.g. two dev servers running locally), so a single fixed ADMIN_URL
+     | keeps breaking CORS for no real reason. Local-only, so this is safe.
+     */
+    'allowed_origins_patterns' => [
+        '#^http://localhost:517[0-9]$#',
+        '#^http://127\.0\.0\.1:517[0-9]$#',
+    ],
 
     'allowed_headers' => ['*'],
 

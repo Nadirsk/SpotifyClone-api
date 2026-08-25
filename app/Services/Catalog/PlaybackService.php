@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace App\Services\Catalog;
 
 use App\Enums\AudioQuality;
+use App\Enums\SubscriptionPlan;
 use App\Exceptions\DomainException;
 use App\Models\Song;
 use App\Models\User;
+use App\Services\Billing\PlanCatalog;
 use App\Services\Billing\SubscriptionService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
@@ -47,6 +49,7 @@ final class PlaybackService
         private readonly SongService $songs,
         private readonly AudioSourceResolver $resolver,
         private readonly SubscriptionService $subscriptions,
+        private readonly PlanCatalog $plans,
     ) {}
 
     /**
@@ -154,7 +157,7 @@ final class PlaybackService
     private function ceilingFor(?User $user): AudioQuality
     {
         if ($user === null) {
-            return AudioQuality::from(config('plans.free.entitlements.max_audio_quality'));
+            return $this->plans->maxQuality(SubscriptionPlan::Free);
         }
 
         return AudioQuality::from(

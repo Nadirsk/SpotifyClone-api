@@ -35,4 +35,21 @@ interface ArtistRepository
      * @return Collection<int, Song>
      */
     public function popularSongs(Artist $artist, int $limit): Collection;
+
+    /**
+     * The admin panel's own listing: newest first, with an optional
+     * name search. Never cached, unlike {@see paginate()} — an admin
+     * editing an artist needs to see the result immediately.
+     *
+     * @return LengthAwarePaginator<int, Artist>
+     */
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator;
+
+    /** @param  array<string, mixed>  $data */
+    public function create(array $data): Artist;
+
+    /** @param  array<string, mixed>  $data */
+    public function update(Artist $artist, array $data): Artist;
+
+    public function delete(Artist $artist): void;
 }

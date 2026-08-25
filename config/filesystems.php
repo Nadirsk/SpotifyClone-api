@@ -60,6 +60,21 @@ return [
             'report' => false,
         ],
 
+        // S3-compatible object storage — used for the avatar upload
+        // (ProfileService::AVATAR_DISK) so an uploaded photo survives a
+        // redeploy instead of living on one app server's local disk.
+        'vultr' => [
+            'driver' => 's3',
+            'key' => env('VULTR_ACCESS_KEY_ID'),
+            'secret' => env('VULTR_SECRET_ACCESS_KEY'),
+            'region' => env('VULTR_DEFAULT_REGION'),
+            'bucket' => env('VULTR_BUCKET'),
+            'endpoint' => env('VULTR_ENDPOINT'),
+            'use_path_style_endpoint' => env('VULTR_USE_PATH_STYLE_ENDPOINT', false),
+            'throw' => false,
+            'report' => false,
+        ],
+
     ],
 
     /*

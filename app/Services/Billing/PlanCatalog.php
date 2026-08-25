@@ -6,16 +6,20 @@ namespace App\Services\Billing;
 
 use App\Enums\AudioQuality;
 use App\Enums\SubscriptionPlan;
+use App\Models\Plan;
 use InvalidArgumentException;
 
 /**
- * Reads `config/plans.php` and answers everything about what a tier costs and
- * what it unlocks.
+ * Reads the `plans` table and answers everything about what a tier costs and
+ * what it unlocks. `SubscriptionService` is the piece that knows which plan a
+ * *user* is on; this one only knows what the plans themselves are.
  *
- * Stateless and free of database access on purpose: pricing is configuration,
- * not data, so this can be resolved anywhere — including inside a validation
- * rule — without a query. `SubscriptionService` is the piece that knows which
- * plan a *user* is on; this one only knows what the plans themselves are.
+ * Per-plan content (name, tagline, seats, device cap, reference price,
+ * entitlements) lives in the database now, editable from the admin panel
+ * without a deploy — see the `plans` migration for why the row identity
+ * itself is not admin-editable. `discount_rate`, `currencies`,
+ * `default_currency` and `currency_by_country` stay in config/plans.php:
+ * site-wide billing policy, not per-plan content.
  *
  * ## The discount
  *
@@ -47,16 +51,16 @@ final class PlanCatalog
     {
         $this->assertCurrency($currency);
 
-        $config = $this->config($plan);
-        $reference = $config['reference_price'][$currency] ?? null;
+        $row = $this->row($plan);
+        $reference = $this->referencePrice($row, $currency);
 
         return [
             'plan' => $plan->value,
-            'name' => $config['name'],
+            'name' => $row->name,
             'label' => $plan->label(),
-            'tagline' => $config['tagline'],
-            'accounts' => $config['accounts'],
-            'max_sessions' => $this->maxSessions($plan),
+            'tagline' => $row->tagline,
+            'accounts' => $row->accounts,
+            'max_sessions' => $row->max_sessions,
             'currency' => $currency,
             'symbol' => $this->symbol($currency),
             /*
@@ -64,8 +68,8 @@ final class PlanCatalog
              | "₹0.00, 20% off ₹0.00" row would be nonsense in the comparison
              | table, and the frontend keys off the null to render "Free".
              */
-            'price' => $reference === null ? null : $this->priceBlock((int) $reference, $currency),
-            'entitlements' => $this->entitlements($plan),
+            'price' => $reference === null ? null : $this->priceBlock($reference, $currency),
+            'entitlements' => $row->entitlements,
         ];
     }
 
@@ -74,14 +78,14 @@ final class PlanCatalog
     {
         $this->assertCurrency($currency);
 
-        $reference = $this->config($plan)['reference_price'][$currency] ?? null;
+        $reference = $this->referencePrice($this->row($plan), $currency);
 
         if ($reference === null) {
             // Free, or a plan not sold in this market. Either way, nothing to charge.
             return 0;
         }
 
-        return $this->discounted((int) $reference);
+        return $this->discounted($reference);
     }
 
     /**
@@ -90,7 +94,7 @@ final class PlanCatalog
      */
     public function entitlements(SubscriptionPlan $plan): array
     {
-        return $this->config($plan)['entitlements'];
+        return $this->row($plan)->entitlements;
     }
 
     public function entitles(SubscriptionPlan $plan, string $capability): bool
@@ -116,9 +120,7 @@ final class PlanCatalog
      */
     public function maxSessions(SubscriptionPlan $plan): ?int
     {
-        $max = $this->config($plan)['max_sessions'] ?? null;
-
-        return $max === null ? null : (int) $max;
+        return $this->row($plan)->max_sessions;
     }
 
     /**
@@ -196,16 +198,24 @@ final class PlanCatalog
         return $this->symbol($currency).number_format($minor / $units, $decimals);
     }
 
-    /** @return array<string, mixed> */
-    private function config(SubscriptionPlan $plan): array
+    private function row(SubscriptionPlan $plan): Plan
     {
-        $config = config("plans.{$plan->value}");
+        $row = Plan::query()->find($plan->value);
 
-        if (! is_array($config)) {
+        if ($row === null) {
             throw new InvalidArgumentException("Plan [{$plan->value}] is not configured.");
         }
 
-        return $config;
+        return $row;
+    }
+
+    private function referencePrice(Plan $row, string $currency): ?int
+    {
+        return match ($currency) {
+            'INR' => $row->reference_price_inr,
+            'USD' => $row->reference_price_usd,
+            default => null,
+        };
     }
 
     private function assertCurrency(string $currency): void

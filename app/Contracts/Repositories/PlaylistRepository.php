@@ -26,6 +26,16 @@ interface PlaylistRepository
     /** @return LengthAwarePaginator<int, Playlist> */
     public function paginateForOwner(User $owner, int $page, int $limit): LengthAwarePaginator;
 
+    /**
+     * The admin panel's own listing — every user-created playlist regardless
+     * of visibility, with an optional title/owner search. Provider-curated
+     * (JioSaavn) playlists are excluded: this screen is for moderating what
+     * people made, not the editorial catalog sync manages.
+     *
+     * @return LengthAwarePaginator<int, Playlist>
+     */
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator;
+
     /** @throws ModelNotFoundException */
     public function findOrFail(string $id): Playlist;
 

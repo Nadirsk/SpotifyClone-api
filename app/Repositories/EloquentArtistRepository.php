@@ -89,4 +89,33 @@ final class EloquentArtistRepository implements ArtistRepository
     {
         return self::ENTITY_ARTIST;
     }
+
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator
+    {
+        $builder = Artist::query()->orderByDesc('created_at');
+
+        if ($search !== null && $search !== '') {
+            $builder->where('name', 'like', '%'.$search.'%');
+        }
+
+        /** @var LengthAwarePaginator<int, Artist> */
+        return $builder->paginate(perPage: $limit, page: $page);
+    }
+
+    public function create(array $data): Artist
+    {
+        return Artist::query()->create($data);
+    }
+
+    public function update(Artist $artist, array $data): Artist
+    {
+        $artist->update($data);
+
+        return $artist;
+    }
+
+    public function delete(Artist $artist): void
+    {
+        $artist->delete();
+    }
 }

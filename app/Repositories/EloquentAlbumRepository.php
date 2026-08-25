@@ -60,6 +60,35 @@ final class EloquentAlbumRepository implements AlbumRepository
         return self::ENTITY_ALBUM;
     }
 
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator
+    {
+        $builder = $this->baseQuery()->orderByDesc('created_at');
+
+        if ($search !== null && $search !== '') {
+            $builder->where('title', 'like', '%'.$search.'%');
+        }
+
+        /** @var LengthAwarePaginator<int, Album> */
+        return $builder->paginate(perPage: $limit, page: $page);
+    }
+
+    public function create(array $data): Album
+    {
+        return Album::query()->create($data);
+    }
+
+    public function update(Album $album, array $data): Album
+    {
+        $album->update($data);
+
+        return $album;
+    }
+
+    public function delete(Album $album): void
+    {
+        $album->delete();
+    }
+
     /** @return Builder<Album> */
     private function baseQuery(): Builder
     {

@@ -42,7 +42,7 @@ final class SubscribeRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'plan.in' => 'Choose one of the Standard, Platinum or Student plans.',
+            'plan.in' => 'Choose one of the Standard, Platinum or Golden plans.',
         ];
     }
 

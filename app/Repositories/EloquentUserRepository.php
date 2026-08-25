@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Repositories;
 
 use App\Contracts\Repositories\UserRepository;
+use App\Enums\UserRole;
 use App\Models\OauthAccount;
 use App\Models\User;
+use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 
 final class EloquentUserRepository implements UserRepository
@@ -15,6 +17,28 @@ final class EloquentUserRepository implements UserRepository
     {
         /** @var User */
         return User::query()->create($attributes);
+    }
+
+    public function adminPaginate(int $page, int $limit, ?string $search): LengthAwarePaginator
+    {
+        $builder = User::query()->orderByDesc('created_at');
+
+        if ($search !== null && $search !== '') {
+            $builder->where(function ($query) use ($search): void {
+                $query->where('name', 'like', '%'.$search.'%')
+                    ->orWhere('email', 'like', '%'.$search.'%');
+            });
+        }
+
+        /** @var LengthAwarePaginator<int, User> */
+        return $builder->paginate(perPage: $limit, page: $page);
+    }
+
+    public function updateRole(User $user, UserRole $role): User
+    {
+        $user->forceFill(['role' => $role])->save();
+
+        return $user;
     }
 
     public function findByEmail(string $email): ?User

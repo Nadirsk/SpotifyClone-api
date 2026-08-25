@@ -132,6 +132,43 @@ final class EloquentSongRepository implements SongRepository
         $song->increment('play_count');
     }
 
+    public function adminPaginate(CatalogQuery $query, ?string $search): LengthAwarePaginator
+    {
+        /*
+         | Filters only, not applyCatalogQuery()'s sort: that defaults to
+         | popularity, which buries a song the admin just created (0
+         | popularity, ~36k rows deep) instead of showing it. Newest-first is
+         | what an admin managing the catalog actually wants.
+         */
+        $builder = $this->applyCatalogFilters($this->baseQuery(), $query)
+            ->orderByDesc('created_at')
+            ->orderByDesc('id');
+
+        if ($search !== null && $search !== '') {
+            $builder->where('title', 'like', '%'.$search.'%');
+        }
+
+        /** @var LengthAwarePaginator<int, Song> */
+        return $builder->paginate(perPage: $query->limit, page: $query->page);
+    }
+
+    public function create(array $data): Song
+    {
+        return Song::query()->create($data);
+    }
+
+    public function update(Song $song, array $data): Song
+    {
+        $song->update($data);
+
+        return $song;
+    }
+
+    public function delete(Song $song): void
+    {
+        $song->delete();
+    }
+
     protected function catalogEntity(): string
     {
         return self::ENTITY_SONG;

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Enums\AudioQuality;
+use App\Enums\UserRole;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -47,9 +48,22 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'role' => UserRole::class,
             'audio_quality' => AudioQuality::class,
             'offline_enabled' => 'boolean',
         ];
+    }
+
+    /**
+     * Whether this account can reach the admin panel's `admin/*` API.
+     *
+     * `role` is deliberately absent from `$fillable` — it must only ever be
+     * set with `forceFill()` from a seeder or console command, never through
+     * a public request payload like `/auth/register`.
+     */
+    public function isAdmin(): bool
+    {
+        return $this->role === UserRole::Admin;
     }
 
     /**
