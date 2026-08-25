@@ -64,9 +64,33 @@ final class EloquentUserRepository implements UserRepository
         return $user;
     }
 
+    /**
+     * `email` and `phone` both carry a hard DB-level unique index that knows
+     * nothing about soft deletes, so a deleted user's original email/phone
+     * would otherwise block that same address from ever registering again
+     * (or the same person from signing back up). Freeing them here — instead
+     * of just leaving them for the `unique` validation rule to worry about —
+     * means the value is gone from the table the moment it's deleted, not
+     * just hidden from Eloquent's default query scope.
+     */
     public function delete(User $user): void
     {
+        $user->fill([
+            'email' => self::freeUpValue($user->email),
+            // Nullable and only 20 chars wide — no room for a traceable
+            // prefix like email gets, so this just frees the slot outright
+            // (MySQL allows more than one NULL in a unique index).
+            'phone' => null,
+        ])->save();
+
         $user->delete();
+    }
+
+    private static function freeUpValue(string $value): string
+    {
+        $mangled = sprintf('deleted+%d+%s', now()->timestamp, $value);
+
+        return mb_substr($mangled, 0, 255);
     }
 
     public function findOrCreateFromOauth(

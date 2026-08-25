@@ -1,6 +1,6 @@
-# Music Discovery Platform — API
+# Music Streaming Platform — API
 
-Laravel 12 / PHP 8.3 REST API for the Music Discovery Platform.
+Laravel 12 / PHP 8.3 REST API for the Music Streaming Platform.
 
 Architecture and requirements live in the numbered documents one level up
 (`../01_PRODUCT_REQUIREMENTS.md` … `../11_PROVIDER_INTEGRATION.md`).

@@ -107,18 +107,25 @@ class AppServiceProvider extends ServiceProvider
     /**
      * Without this, `ResetPassword::toMail()` falls back to `route('password.reset', ...)`,
      * which does not exist in this API-only app — this app has no Blade reset
-     * form, the Next.js frontend does — so link generation would throw and
-     * `AuthService::forgotPassword()`'s catch would silently swallow it,
-     * leaving no usable link in the email (or, locally, the log) at all.
-     * `cors.allowed_origins.0` is reused rather than a second env read because
-     * it is already this app's one source of truth for "where the frontend is."
+     * form, the Next.js website and the Vuexy admin panel each have their own
+     * — so link generation would throw and `AuthService::forgotPassword()`'s
+     * catch would silently swallow it, leaving no usable link in the email
+     * (or, locally, the log) at all.
+     *
+     * An admin's reset link must land on the admin panel, not the public
+     * website — they have no account there, and the website's reset form has
+     * no way back into `admin/*`. `cors.allowed_origins` is reused rather
+     * than a second pair of env reads because it is already this app's one
+     * source of truth for "where is the website" / "where is the admin panel".
      */
     private function configurePasswordResetUrl(): void
     {
         ResetPassword::createUrlUsing(function (User $user, string $token): string {
-            $frontendUrl = rtrim((string) config('cors.allowed_origins.0'), '/');
+            $origins = (array) config('cors.allowed_origins');
+            $index = $user->isAdmin() ? 1 : 0;
+            $baseUrl = rtrim((string) ($origins[$index] ?? $origins[0]), '/');
 
-            return "{$frontendUrl}/reset-password?token={$token}&email=".urlencode($user->email);
+            return "{$baseUrl}/reset-password?token={$token}&email=".urlencode($user->email);
         });
     }
 

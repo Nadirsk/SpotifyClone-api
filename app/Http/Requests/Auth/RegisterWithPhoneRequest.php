@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Requests\Auth;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 final class RegisterWithPhoneRequest extends FormRequest
 {
@@ -20,8 +21,9 @@ final class RegisterWithPhoneRequest extends FormRequest
     {
         return [
             // Bare 10 digits, matching SendOtpRequest/VerifyOtpRequest — the
-            // gateway behind phone sign-up is India-only.
-            'phone' => ['required', 'digits:10', 'unique:users,phone'],
+            // gateway behind phone sign-up is India-only. Soft-deleted rows
+            // are excluded for the same reason as RegisterRequest::rules().
+            'phone' => ['required', 'digits:10', Rule::unique('users', 'phone')->whereNull('deleted_at')],
             'name' => ['required', 'string', 'max:255'],
             'country' => ['nullable', 'string', 'size:2'],
             'language' => ['nullable', 'string', 'max:10'],

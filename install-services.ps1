@@ -13,7 +13,7 @@ New-Item -ItemType Directory -Force -Path "$appDir\storage\logs\services" | Out-
 # --- Queue worker: consumes the `sync` and `default` queues ---------------
 & $nssm install MusicQueueWorker $php "artisan queue:work --queue=sync,default --sleep=3 --max-time=3600"
 & $nssm set MusicQueueWorker AppDirectory $appDir
-& $nssm set MusicQueueWorker DisplayName "Music Discovery - Queue Worker"
+& $nssm set MusicQueueWorker DisplayName "Music Streaming - Queue Worker"
 & $nssm set MusicQueueWorker Description "Processes queued jobs (lazy sync, artist/album/playlist sync, crawl frontier). Without this, jobs sit in the jobs table and are never executed."
 & $nssm set MusicQueueWorker Start SERVICE_AUTO_START
 & $nssm set MusicQueueWorker AppStdout "$appDir\storage\logs\services\queue-out.log"
@@ -28,7 +28,7 @@ New-Item -ItemType Directory -Force -Path "$appDir\storage\logs\services" | Out-
 # --- Scheduler: fires CrawlFrontierJob / SyncPlaylistsJob / etc. on their cron ---
 & $nssm install MusicScheduler $php "artisan schedule:work"
 & $nssm set MusicScheduler AppDirectory $appDir
-& $nssm set MusicScheduler DisplayName "Music Discovery - Scheduler"
+& $nssm set MusicScheduler DisplayName "Music Streaming - Scheduler"
 & $nssm set MusicScheduler Description "Runs routes/console.php's Schedule entries every minute (catalog crawl every 5 min, playlist sync every 30 min, etc). Without this, nothing in that file ever fires."
 & $nssm set MusicScheduler Start SERVICE_AUTO_START
 & $nssm set MusicScheduler AppStdout "$appDir\storage\logs\services\scheduler-out.log"

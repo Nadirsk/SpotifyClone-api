@@ -1,7 +1,7 @@
 openapi: 3.1.0
 
 info:
-  title: Music Discovery Platform API
+  title: Music Streaming Platform API
   version: "1.0"
   description: |
     Metadata-first music discovery API. The platform never hosts or streams
