@@ -18,9 +18,20 @@ class DatabaseSeeder extends Seeder
      * The three reference seeders are idempotent, so re-running only refreshes
      * them; the catalog and user seeders detect data they have already written
      * and skip or replace it rather than duplicating it.
+     *
+     * `PlanSeeder` runs unconditionally on every `db:seed` (including the
+     * `--force` call the deploy pipeline makes after every migration) because
+     * it is the only seeder here safe to run against production every time —
+     * `updateOrCreate` on four fixed rows, never touching an admin-edited row
+     * it wasn't asked about. The rest stay commented out: they either seed
+     * one-time fixture/import data or would duplicate/overwrite real records.
      */
     public function run(): void
     {
+        $this->call([
+            PlanSeeder::class,
+        ]);
+
         // $this->call([
         //     GenreSeeder::class,
         //     LanguageSeeder::class,
