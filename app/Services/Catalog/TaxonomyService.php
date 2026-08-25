@@ -208,24 +208,34 @@ final class TaxonomyService
      * MariaDB has supported window functions since 10.2 and MySQL since 8.0,
      * both below this project's floor.
      *
+     * `$candidates` is wrapped in its own subquery before the window function is
+     * added, rather than appending `ROW_NUMBER()` to its select list directly:
+     * `group_id` there is a `selectRaw` alias (`songs.genre_id as group_id`, or
+     * similar), and neither MySQL nor MariaDB resolve a same-level SELECT-list
+     * alias inside a window function's `PARTITION BY` — only a real column of
+     * an already-materialized FROM. `popularAlbumsByLanguage()` above never hits
+     * this because it partitions by the genuine `language_id` column, not an
+     * alias defined in the same select.
+     *
      * @param  \Illuminate\Database\Query\Builder  $candidates  Selecting `group_id`, `cover_image`, `popularity`.
      * @return array<string, string>
      */
     private function topCoverPerGroup($candidates): array
     {
         $ranked = DB::query()
-            ->fromSub(
-                $candidates->selectRaw(
-                    'ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY popularity DESC) as rank_in_group'
-                ),
-                'ranked',
-            )
+            ->fromSub($candidates, 'base')
+            ->selectRaw(
+                'group_id, cover_image, ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY popularity DESC) as rank_in_group'
+            );
+
+        $rows = DB::query()
+            ->fromSub($ranked, 'ranked')
             ->where('rank_in_group', 1)
             ->get(['group_id', 'cover_image']);
 
         $covers = [];
 
-        foreach ($ranked as $row) {
+        foreach ($rows as $row) {
             $covers[(string) $row->group_id] = (string) $row->cover_image;
         }
 
