@@ -8,20 +8,22 @@ reason and what it will take to finish them. Nothing here is an accident — do 
 
 ## 1. Redis (cache, sessions, queues, rate limiting)
 
-**Status:** deferred until the production deploy.
-**Why:** Redis is not installed on the development machine and there is no Docker.
+**Status:** done in production; still deferred on the local dev machine.
+**Why (dev):** Redis (`phpredis`) is not installed on the local Windows/XAMPP
+machine, so local `.env` stays on the `database` driver for
+`CACHE_STORE`/`QUEUE_CONNECTION`/`SESSION_DRIVER`/`APP_MAINTENANCE_STORE`.
 **Docs:** `02_SYSTEM_ARCHITECTURE` §7, `10_DEPLOYMENT_DEVOPS` §9.
 
-Today the app runs on `CACHE_STORE=database`, `QUEUE_CONNECTION=database`,
-`SESSION_DRIVER=database`.
+Production (`backend/.env.example`) has Redis provisioned and runs
+`CACHE_STORE=redis`, `QUEUE_CONNECTION=redis`, `SESSION_DRIVER=redis`,
+`APP_MAINTENANCE_STORE=redis`. Local dev intentionally does not mirror this —
+flipping local `.env` to `redis` without the extension installed throws
+`Class "Redis" not found` on every request (hit and fixed during the
+2026-08-24 session).
 
-To finish:
-
-1. Provision Redis, set `REDIS_HOST` / `REDIS_PASSWORD` / `REDIS_PORT`.
-2. Set `CACHE_STORE=redis`, `QUEUE_CONNECTION=redis`, `SESSION_DRIVER=redis`.
-3. Install `predis/predis` or the `phpredis` extension.
-4. Nothing in application code should need to change — everything caches through
-   `App\Services\Cache\CacheService`, which uses the `Cache` facade.
+Nothing in application code needs to change per environment — everything
+caches through `App\Services\Cache\CacheService`, which uses the `Cache`
+facade.
 
 Note: the `database` cache store does not support tag-based flushing, so
 `CacheService` invalidates by explicit key rather than by tag. That works on Redis

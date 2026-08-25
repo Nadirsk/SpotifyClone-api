@@ -466,13 +466,13 @@ jobs:
 
             # Setup Reverb supervisor if enabled
             if [ "${SUPERVISOR_REVERB_ENABLED:-false}" = "true" ]; then
-              REVERB_CONF="${SUPERVISOR_REVERB_CONF_NAME:-signagesync-reverb}"
-              REVERB_PORT="${SUPERVISOR_REVERB_PORT:-6005}"
+              REVERB_CONF="${SUPERVISOR_REVERB_CONF_NAME:-music-streaming-reverb}"
+              REVERB_PORT="${SUPERVISOR_REVERB_PORT:-6009}"
               REVERB_HOST="${SUPERVISOR_REVERB_HOST:-0.0.0.0}"
               REVERB_USER="${SUPERVISOR_REVERB_USER:-www-data}"
               REVERB_NUMPROCS="${SUPERVISOR_REVERB_NUMPROCS:-1}"
 
-              printf "[program:%s]\nprocess_name=%s\ncommand=/usr/bin/php %s/artisan reverb:start --host=%s --port=%s\nautostart=true\nautorestart=true\nstopasgroup=true\nkillasgroup=true\nuser=%s\nnumprocs=%s\nredirect_stderr=true\nstdout_logfile=%s/logs/reverb.log\nstopwaitsecs=3600\n" "$REVERB_CONF" "$PROC_NAME" "$ACTIVE_RELEASE_PATH" "$REVERB_HOST" "$REVERB_PORT" "$REVERB_USER" "$REVERB_NUMPROCS" "$STORAGE_PATH" | sudo tee /etc/supervisor/conf.d/${REVERB_CONF}.conf > /dev/null
+              printf "[program:%s]\nprocess_name=%s\ncommand=/usr/bin/php8.3 %s/artisan reverb:start --host=%s --port=%s\nautostart=true\nautorestart=true\nstopasgroup=true\nkillasgroup=true\nuser=%s\nnumprocs=%s\nredirect_stderr=true\nstdout_logfile=%s/logs/reverb.log\nstopwaitsecs=3600\n" "$REVERB_CONF" "$PROC_NAME" "$ACTIVE_RELEASE_PATH" "$REVERB_HOST" "$REVERB_PORT" "$REVERB_USER" "$REVERB_NUMPROCS" "$STORAGE_PATH" | sudo tee /etc/supervisor/conf.d/${REVERB_CONF}.conf > /dev/null
               sudo supervisorctl reread
               sudo supervisorctl update
               sudo supervisorctl restart "${REVERB_CONF}:*"
@@ -480,7 +480,7 @@ jobs:
 
             # Setup Queue supervisor if enabled
             if [ "${SUPERVISOR_QUEUE_ENABLED:-false}" = "true" ]; then
-              QUEUE_CONF="${SUPERVISOR_QUEUE_CONF_NAME:-signagesync-queue}"
+              QUEUE_CONF="${SUPERVISOR_QUEUE_CONF_NAME:-music-streaming-queue}"
               QUEUE_TRIES="${SUPERVISOR_QUEUE_TRIES:-3}"
               QUEUE_USER="${SUPERVISOR_QUEUE_USER:-www-data}"
               QUEUE_NUMPROCS="${SUPERVISOR_QUEUE_NUMPROCS:-1}"
@@ -493,7 +493,7 @@ jobs:
 
             # Setup Uploads queue supervisor if enabled
             if [ "${SUPERVISOR_UPLOADS_ENABLED:-false}" = "true" ]; then
-              UPLOADS_CONF="${SUPERVISOR_UPLOADS_CONF_NAME:-signagesync-uploads}"
+              UPLOADS_CONF="${SUPERVISOR_UPLOADS_CONF_NAME:-music-streaming-uploads}"
               UPLOADS_USER="${SUPERVISOR_UPLOADS_USER:-www-data}"
               UPLOADS_NUMPROCS="${SUPERVISOR_UPLOADS_NUMPROCS:-1}"
 
@@ -530,7 +530,7 @@ jobs:
 
               # Add WebSocket proxy if Reverb is enabled
               if [ "${SUPERVISOR_REVERB_ENABLED:-false}" = "true" ]; then
-                REVERB_PORT="${SUPERVISOR_REVERB_PORT:-6005}"
+                REVERB_PORT="${SUPERVISOR_REVERB_PORT:-6009}"
                 VHOST="$VHOST
 
                 ProxyPreserveHost On
