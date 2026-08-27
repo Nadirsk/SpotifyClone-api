@@ -85,11 +85,18 @@ final class DiagnosticsController extends Controller
     }
 
     /**
-     * Live `ps` snapshot of every artisan process on this box, e.g. the exact
+     * Live `ps` snapshot of this app's own artisan processes, e.g. the exact
      * `--queue=` flags `queue:work` was started with, or whether
      * `schedule:work` / `reverb:start` are running at all - the things the
      * heartbeats above can't distinguish (a heartbeat only proves *some*
      * queue/scheduler process is alive, not which one or with what flags).
+     *
+     * Filtered to `base_path('artisan')` deliberately - this box is shared
+     * with other clients' apps (ServerPilot-style multi-tenant hosting), and
+     * an unscoped `grep artisan` would leak every other app's queue/reverb
+     * command lines (ports, tries, queue names) to anyone holding only this
+     * app's diagnostics key. Scoping to this app's own release path is what
+     * keeps this page's blast radius to "this app" instead of "this server".
      *
      * Null means the check itself could not run (shell_exec disabled, or this
      * isn't a shell that has `ps` - e.g. local Windows dev). Empty array means
@@ -101,7 +108,8 @@ final class DiagnosticsController extends Controller
             return null;
         }
 
-        $output = @shell_exec('ps -eo pid,args 2>/dev/null | grep "artisan" | grep -v grep');
+        $needle = escapeshellarg(base_path('artisan'));
+        $output = @shell_exec("ps -eo pid,args 2>/dev/null | grep {$needle} | grep -v grep");
 
         if ($output === null) {
             return null;
