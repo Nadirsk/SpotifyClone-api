@@ -476,6 +476,16 @@ jobs:
               sudo supervisorctl reread
               sudo supervisorctl update
               sudo supervisorctl restart "${REVERB_CONF}:*"
+
+              # The vhost below proxies /app to Reverb over `ws://`, which Apache
+              # can only complete the websocket upgrade for when proxy_wstunnel is
+              # loaded (see music-streaming-website's deploy workflow, which
+              # already does this for its own ProxyPass). Run this on every
+              # deploy, not just first-time vhost creation below, since a2enmod
+              # is idempotent and this must not depend on REFRESH_VIRTUAL_HOST
+              # ever being set on a site whose vhost predates Reverb.
+              sudo a2enmod proxy proxy_http proxy_wstunnel rewrite
+              sudo systemctl reload apache2
             fi
 
             # Setup Queue supervisor if enabled
