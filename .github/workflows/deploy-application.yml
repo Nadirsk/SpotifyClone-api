@@ -495,7 +495,12 @@ jobs:
               QUEUE_USER="${SUPERVISOR_QUEUE_USER:-www-data}"
               QUEUE_NUMPROCS="${SUPERVISOR_QUEUE_NUMPROCS:-1}"
 
-              printf "[program:%s]\nprocess_name=%s\ncommand=/usr/bin/php8.3 %s/artisan queue:work --tries=%s --timeout=60 --max-time=3600 --sleep=1\nautostart=true\nautorestart=true\nstopasgroup=true\nkillasgroup=true\nuser=%s\nnumprocs=%s\nredirect_stderr=true\nstdout_logfile=%s/logs/queue.log\n" "$QUEUE_CONF" "$PROC_NAME" "$ACTIVE_RELEASE_PATH" "$QUEUE_TRIES" "$QUEUE_USER" "$QUEUE_NUMPROCS" "$STORAGE_PATH" | sudo tee /etc/supervisor/conf.d/${QUEUE_CONF}.conf > /dev/null
+              # --queue=sync,default,notifications: jobs declare their own queue via
+              # onQueue() (SyncSongsJob/CrawlFrontierJob/etc -> sync, SendWelcomeNotification
+              # -> notifications, everything else -> default). A worker with no --queue
+              # flag only drains "default" - sync/notifications jobs would enqueue and sit
+              # forever with no consumer, silently, with no failed_jobs row to notice by.
+              printf "[program:%s]\nprocess_name=%s\ncommand=/usr/bin/php8.3 %s/artisan queue:work --queue=sync,default,notifications --tries=%s --timeout=60 --max-time=3600 --sleep=1\nautostart=true\nautorestart=true\nstopasgroup=true\nkillasgroup=true\nuser=%s\nnumprocs=%s\nredirect_stderr=true\nstdout_logfile=%s/logs/queue.log\n" "$QUEUE_CONF" "$PROC_NAME" "$ACTIVE_RELEASE_PATH" "$QUEUE_TRIES" "$QUEUE_USER" "$QUEUE_NUMPROCS" "$STORAGE_PATH" | sudo tee /etc/supervisor/conf.d/${QUEUE_CONF}.conf > /dev/null
               sudo supervisorctl reread
               sudo supervisorctl update
               sudo supervisorctl restart "${QUEUE_CONF}:*"
