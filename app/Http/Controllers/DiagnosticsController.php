@@ -63,6 +63,7 @@ final class DiagnosticsController extends Controller
             'schedulerStale' => $schedulerAgeSeconds === null || $schedulerAgeSeconds > self::SCHEDULER_STALE_AFTER_SECONDS,
             'queueAgeSeconds' => $this->ageInSeconds($queueHeartbeat, $now),
             'failedJobs' => (int) DB::table('failed_jobs')->count(),
+            'processes' => $this->runningArtisanProcesses(),
             'reverb' => [
                 'key' => config('broadcasting.connections.reverb.key'),
                 'host' => config('broadcasting.connections.reverb.options.host'),
@@ -81,5 +82,31 @@ final class DiagnosticsController extends Controller
         // Carbon's diffInSeconds returns a float (it supports sub-second
         // precision generally); this call site only ever wants whole seconds.
         return (int) round($heartbeat->diffInSeconds($now, true));
+    }
+
+    /**
+     * Live `ps` snapshot of every artisan process on this box, e.g. the exact
+     * `--queue=` flags `queue:work` was started with, or whether
+     * `schedule:work` / `reverb:start` are running at all - the things the
+     * heartbeats above can't distinguish (a heartbeat only proves *some*
+     * queue/scheduler process is alive, not which one or with what flags).
+     *
+     * Null means the check itself could not run (shell_exec disabled, or this
+     * isn't a shell that has `ps` - e.g. local Windows dev). Empty array means
+     * it ran cleanly and found nothing.
+     */
+    private function runningArtisanProcesses(): ?array
+    {
+        if (! function_exists('shell_exec') || str_contains((string) ini_get('disable_functions'), 'shell_exec')) {
+            return null;
+        }
+
+        $output = @shell_exec('ps -eo pid,args 2>/dev/null | grep "artisan" | grep -v grep');
+
+        if ($output === null) {
+            return null;
+        }
+
+        return array_values(array_filter(array_map('trim', explode("\n", $output))));
     }
 }
