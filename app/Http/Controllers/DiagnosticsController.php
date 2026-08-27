@@ -63,13 +63,7 @@ final class DiagnosticsController extends Controller
             'schedulerStale' => $schedulerAgeSeconds === null || $schedulerAgeSeconds > self::SCHEDULER_STALE_AFTER_SECONDS,
             'queueAgeSeconds' => $this->ageInSeconds($queueHeartbeat, $now),
             'failedJobs' => (int) DB::table('failed_jobs')->count(),
-            'processes' => $this->runningArtisanProcesses(),
-            'reverb' => [
-                'key' => config('broadcasting.connections.reverb.key'),
-                'host' => config('broadcasting.connections.reverb.options.host'),
-                'port' => config('broadcasting.connections.reverb.options.port'),
-                'scheme' => config('broadcasting.connections.reverb.options.scheme'),
-            ],
+            'reverb' => $this->publicReverbEndpoint(),
         ]);
     }
 
@@ -85,36 +79,30 @@ final class DiagnosticsController extends Controller
     }
 
     /**
-     * Live `ps` snapshot of this app's own artisan processes, e.g. the exact
-     * `--queue=` flags `queue:work` was started with, or whether
-     * `schedule:work` / `reverb:start` are running at all - the things the
-     * heartbeats above can't distinguish (a heartbeat only proves *some*
-     * queue/scheduler process is alive, not which one or with what flags).
+     * The address a real visitor's browser dials, for this page's client-side
+     * handshake test - deliberately NOT `broadcasting.connections.reverb.options`.
      *
-     * Filtered to `base_path('artisan')` deliberately - this box is shared
-     * with other clients' apps (ServerPilot-style multi-tenant hosting), and
-     * an unscoped `grep artisan` would leak every other app's queue/reverb
-     * command lines (ports, tries, queue names) to anyone holding only this
-     * app's diagnostics key. Scoping to this app's own release path is what
-     * keeps this page's blast radius to "this app" instead of "this server".
-     *
-     * Null means the check itself could not run (shell_exec disabled, or this
-     * isn't a shell that has `ps` - e.g. local Windows dev). Empty array means
-     * it ran cleanly and found nothing.
+     * That config is `REVERB_HOST=127.0.0.1` / `REVERB_PORT=6009` /
+     * `REVERB_SCHEME=http` on purpose: it's what this app's own PHP process
+     * uses to POST events to Reverb's `/apps/{id}/events` (see
+     * BroadcastManager::pusher() -> PusherBroadcaster), and going straight to
+     * loopback there skips Apache entirely - which matters, because Apache's
+     * vhost only proxies `/app` (the websocket route); a plain HTTP POST to
+     * `/apps/.../events` over the public host has no matching proxy rule.
+     * Reusing that loopback config here would make this test dial 127.0.0.1
+     * from the *browser*, which always times out and says nothing about
+     * whether Reverb is reachable from outside.
      */
-    private function runningArtisanProcesses(): ?array
+    private function publicReverbEndpoint(): array
     {
-        if (! function_exists('shell_exec') || str_contains((string) ini_get('disable_functions'), 'shell_exec')) {
-            return null;
-        }
+        $appUrl = parse_url((string) config('app.url'));
+        $scheme = $appUrl['scheme'] ?? 'https';
 
-        $needle = escapeshellarg(base_path('artisan'));
-        $output = @shell_exec("ps -eo pid,args 2>/dev/null | grep {$needle} | grep -v grep");
-
-        if ($output === null) {
-            return null;
-        }
-
-        return array_values(array_filter(array_map('trim', explode("\n", $output))));
+        return [
+            'key' => config('broadcasting.connections.reverb.key'),
+            'host' => $appUrl['host'] ?? null,
+            'port' => $scheme === 'https' ? 443 : 80,
+            'scheme' => $scheme,
+        ];
     }
 }

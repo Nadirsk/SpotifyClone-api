@@ -87,28 +87,6 @@
             <td>WebSocket (Reverb)</td>
             <td id="reverb-status"><span class="pending">Checking&hellip;</span></td>
         </tr>
-        <tr>
-            <td>Running processes</td>
-            <td>
-                @if ($processes === null)
-                    <span class="pending">Cannot check</span>
-                    <div class="detail"><code>shell_exec</code> is disabled on this host, so `ps` can't be run from here.</div>
-                @elseif (empty($processes))
-                    <span class="fail">No artisan process found</span>
-                    <div class="detail">
-                        Neither <code>queue:work</code>, <code>schedule:work</code>, nor
-                        <code>reverb:start</code> showed up in <code>ps</code> just now. A cron entry
-                        calling <code>schedule:run</code> directly won't appear here either &mdash; it
-                        exits within a second, which is what the Scheduler heartbeat above is for
-                        instead.
-                    </div>
-                @else
-                    @foreach ($processes as $line)
-                        <div class="detail" style="color:#ccc; font-family: ui-monospace, monospace; word-break: break-all;">{{ $line }}</div>
-                    @endforeach
-                @endif
-            </td>
-        </tr>
     </table>
 
     <a class="refresh" href="{{ url()->full() }}">&#8635; Refresh</a>
@@ -161,7 +139,12 @@
                 wsPort: port,
                 wssPort: port,
                 forceTLS: secure,
-                enabledTransports: secure ? ['wss'] : ['ws'],
+                // Just "ws" - pusher-js's transport table only ever registers a "ws"
+                // key; whether it dials ws:// or wss:// is decided by forceTLS above,
+                // not by the transport name. Passing "wss" here matches no registered
+                // transport, so pusher-js finds zero usable strategies and this check
+                // reports "Timed out" even when Reverb and Apache are both fine.
+                enabledTransports: ['ws'],
                 disableStats: true,
             });
 
