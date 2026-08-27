@@ -34,6 +34,15 @@ return [
         'redirect' => env('GOOGLE_REDIRECT_URI'),
     ],
 
+    /*
+     | Where AuthController::googleCallback() sends the browser back to once
+     | Socialite has run — the frontend is a separate origin from this API, and
+     | env() itself is unsafe outside config/ once config is cached.
+     */
+    'frontend' => [
+        'url' => env('FRONTEND_URL', 'http://localhost:3000'),
+    ],
+
     'slack' => [
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),

@@ -8,10 +8,13 @@ use App\Contracts\Repositories\UserRepository;
 use App\Events\UserRegistered;
 use App\Exceptions\SessionLimitReachedException;
 use App\Models\User;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Laravel\Sanctum\PersonalAccessToken;
 use Laravel\Socialite\Facades\Socialite;
@@ -46,6 +49,18 @@ final class AuthService
     private const THROTTLED = 'Too many login attempts. Please try again later.';
 
     private const OAUTH_FAILED = 'Google authentication failed. Please try signing in again.';
+
+    /**
+     * Same shape as DeviceSessionService's conflict ticket: a random key the
+     * callback mints and the frontend's landing page redeems once, seconds
+     * later. Needed because the Google callback is a full browser navigation
+     * to this API's own origin — there is no Next.js code running on that
+     * response to catch a token, only on whatever page the browser lands on
+     * next.
+     */
+    private const GOOGLE_EXCHANGE_PREFIX = 'auth:google:exchange:';
+
+    private const GOOGLE_EXCHANGE_TTL_SECONDS = 60;
 
     /**
      * Per email+IP lockout, tighter than the global per-minute throttle in
@@ -391,6 +406,56 @@ final class AuthService
         return [
             'user' => $user,
             'token' => $this->issueToken($user),
+        ];
+    }
+
+    /**
+     * What `AuthController::googleCallback()` actually calls: runs
+     * `loginWithGoogle()` above, then stashes the result behind a one-time code
+     * instead of handing the token back directly — see GOOGLE_EXCHANGE_PREFIX
+     * for why the callback itself cannot deliver the token.
+     */
+    public function completeGoogleLogin(): string
+    {
+        $result = $this->loginWithGoogle();
+
+        $code = Str::random(64);
+
+        Cache::put(self::GOOGLE_EXCHANGE_PREFIX.$code, [
+            'user_id' => $result['user']->getKey(),
+            'token' => $result['token'],
+        ], self::GOOGLE_EXCHANGE_TTL_SECONDS);
+
+        return $code;
+    }
+
+    /**
+     * Redeems a `completeGoogleLogin()` code. One-time by construction: it is
+     * forgotten as soon as it is read, whether or not it turns out to be valid,
+     * so a leaked or replayed code (a shared link, a browser-history entry) is
+     * only ever good for one login.
+     *
+     * @return array{user: User, token: string}
+     */
+    public function exchangeGoogleCode(string $code): array
+    {
+        $payload = Cache::get(self::GOOGLE_EXCHANGE_PREFIX.$code);
+
+        Cache::forget(self::GOOGLE_EXCHANGE_PREFIX.$code);
+
+        if (! is_array($payload) || ! isset($payload['user_id'], $payload['token'])) {
+            throw new HttpException(Response::HTTP_UNAUTHORIZED, self::OAUTH_FAILED);
+        }
+
+        try {
+            $user = $this->users->findOrFail((string) $payload['user_id']);
+        } catch (ModelNotFoundException) {
+            throw new HttpException(Response::HTTP_UNAUTHORIZED, self::OAUTH_FAILED);
+        }
+
+        return [
+            'user' => $user,
+            'token' => (string) $payload['token'],
         ];
     }
 

@@ -7,6 +7,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Exceptions\SessionLimitReachedException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\ForgotPasswordRequest;
+use App\Http\Requests\Auth\GoogleExchangeRequest;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Requests\Auth\LoginWithPhoneRequest;
 use App\Http\Requests\Auth\RegisterRequest;
@@ -21,7 +22,9 @@ use App\Services\Auth\AuthService;
 use App\Traits\ApiResponse;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 /**
  * Authentication endpoints (05_API_SPECIFICATION §4).
@@ -162,9 +165,34 @@ final class AuthController extends Controller
         );
     }
 
-    public function googleCallback(): JsonResponse
+    /**
+     * Google lands the browser here directly — a full navigation to this API's
+     * own origin, not an XHR the Next.js client can read a token out of. So
+     * this redirects on to the frontend with a one-time code instead of
+     * returning JSON; `googleExchange()` below is where the real session is
+     * actually handed over.
+     */
+    public function googleCallback(): RedirectResponse
     {
-        $result = $this->auth->loginWithGoogle();
+        $frontend = rtrim((string) config('services.frontend.url'), '/');
+
+        try {
+            $code = $this->auth->completeGoogleLogin();
+        } catch (HttpException) {
+            return redirect()->away("{$frontend}/login?error=google");
+        }
+
+        return redirect()->away("{$frontend}/login/google/callback?code={$code}");
+    }
+
+    /**
+     * Where `googleCallback()`'s redirect actually lands: the frontend trades
+     * its one-time code for the same {user, token} shape every other login
+     * endpoint returns.
+     */
+    public function googleExchange(GoogleExchangeRequest $request): JsonResponse
+    {
+        $result = $this->auth->exchangeGoogleCode((string) $request->validated('code'));
 
         return $this->respondSuccess($this->tokenPayload($result), 'Login successful');
     }

@@ -12,10 +12,10 @@ use App\Http\Controllers\Api\V1\Admin\AdminLanguageController;
 use App\Http\Controllers\Api\V1\Admin\AdminPlanController;
 use App\Http\Controllers\Api\V1\Admin\AdminPlaylistController;
 use App\Http\Controllers\Api\V1\Admin\AdminReportController;
-use App\Http\Controllers\Api\V1\Admin\AdminSubscriptionController;
-use App\Http\Controllers\Api\V1\Admin\AdminVenueController;
 use App\Http\Controllers\Api\V1\Admin\AdminSongController;
+use App\Http\Controllers\Api\V1\Admin\AdminSubscriptionController;
 use App\Http\Controllers\Api\V1\Admin\AdminUserController;
+use App\Http\Controllers\Api\V1\Admin\AdminVenueController;
 use App\Http\Controllers\Api\V1\AlbumController;
 use App\Http\Controllers\Api\V1\ArtistController;
 use App\Http\Controllers\Api\V1\ArtistFollowController;
@@ -75,6 +75,9 @@ Route::prefix('auth')->group(function (): void {
 
     Route::get('google', [AuthController::class, 'googleRedirect']);
     Route::get('google/callback', [AuthController::class, 'googleCallback']);
+    // The frontend's landing page redeems the callback's one-time code for a
+    // real session — see AuthController::googleCallback()'s own comment.
+    Route::post('google/exchange', [AuthController::class, 'googleExchange']);
 
     /*
      | Phone sign-up's OTP send/verify. Not in 05_API_SPECIFICATION — see the
